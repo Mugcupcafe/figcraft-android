@@ -1097,7 +1097,7 @@ impl FigcraftAndroidShell {
         let cache_dir = dir.join("drive_cache");
         let _ = std::fs::create_dir_all(&cache_dir);
         let Some(doc_state) = self.fig.session.docs.get(self.fig.session.active) else { return; };
-        let raw_name = if doc_state.name.trim().is_empty() { "Untitled" } else { doc_state.name.trim() };
+        let raw_name = if doc_state.doc.name.trim().is_empty() { "Untitled" } else { doc_state.doc.name.trim() };
         let safe_name: String = raw_name
             .chars()
             .map(|c| if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
