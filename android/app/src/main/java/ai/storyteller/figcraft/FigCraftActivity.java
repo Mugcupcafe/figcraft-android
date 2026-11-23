@@ -121,35 +121,29 @@ public class FigCraftActivity extends GameActivity {
         super.onCreate(savedInstanceState);
         activeInstance = new WeakReference<>(this);
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(
-                        this,
-                        new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                        REQ_POST_NOTIFICATIONS
-                );
-            }
+        View rootView = findViewById(android.R.id.content);
+        if (rootView == null && getWindow() != null) {
+            rootView = getWindow().getDecorView();
         }
+        if (rootView != null) {
+            ViewCompat.setOnApplyWindowInsetsListener(rootView, (v, insets) -> {
+                if (immersiveEnabled) {
+                    Insets cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout());
+                    enqueueControl("insets" + SEP + cutout.top + SEP + cutout.right + SEP + cutout.bottom + SEP + cutout.left);
+                } else {
+                    Insets sys = insets.getInsets(
+                            WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
+                    );
+                    enqueueControl("insets" + SEP + sys.top + SEP + sys.right + SEP + sys.bottom + SEP + sys.left);
+                }
 
-        View decor = getWindow().getDecorView();
-        ViewCompat.setOnApplyWindowInsetsListener(decor, (v, insets) -> {
-            if (immersiveEnabled) {
-                Insets cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout());
-                enqueueControl("insets" + SEP + cutout.top + SEP + cutout.right + SEP + cutout.bottom + SEP + cutout.left);
-            } else {
-                Insets sys = insets.getInsets(
-                        WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
-                );
-                enqueueControl("insets" + SEP + sys.top + SEP + sys.right + SEP + sys.bottom + SEP + sys.left);
-            }
-
-            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-            boolean imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime());
-            enqueueControl("ime" + SEP + (imeVisible ? "1" : "0") + SEP + ime.bottom);
-            return ViewCompat.onApplyWindowInsets(v, insets);
-        });
-        ViewCompat.requestApplyInsets(decor);
+                Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+                boolean imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime());
+                enqueueControl("ime" + SEP + (imeVisible ? "1" : "0") + SEP + ime.bottom);
+                return ViewCompat.onApplyWindowInsets(v, insets);
+            });
+            ViewCompat.requestApplyInsets(rootView);
+        }
     }
 
     @Override
@@ -182,20 +176,25 @@ public class FigCraftActivity extends GameActivity {
 
     private void applyImmersiveMode(boolean enable) {
         immersiveEnabled = enable;
-        View decor = getWindow().getDecorView();
-        WindowCompat.setDecorFitsSystemWindows(getWindow(), !enable);
-        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), decor);
-        if (controller != null) {
-            if (enable) {
-                controller.setSystemBarsBehavior(
-                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                );
-                controller.hide(WindowInsetsCompat.Type.systemBars());
-            } else {
-                controller.show(WindowInsetsCompat.Type.systemBars());
+        try {
+            if (getWindow() == null) return;
+            View decor = getWindow().getDecorView();
+            if (decor == null) return;
+            WindowCompat.setDecorFitsSystemWindows(getWindow(), !enable);
+            WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), decor);
+            if (controller != null) {
+                if (enable) {
+                    controller.setSystemBarsBehavior(
+                            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    );
+                    controller.hide(WindowInsetsCompat.Type.systemBars());
+                } else {
+                    controller.show(WindowInsetsCompat.Type.systemBars());
+                }
             }
+            ViewCompat.requestApplyInsets(decor);
+        } catch (Exception ignored) {
         }
-        ViewCompat.requestApplyInsets(decor);
     }
 
     @Override
@@ -285,26 +284,32 @@ public class FigCraftActivity extends GameActivity {
                 }
                 case "open_file": {
                     runOnUiThread(() -> {
-                        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                        intent.addCategory(Intent.CATEGORY_OPENABLE);
-                        intent.setType("*/*");
-                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-                        startActivityForResult(intent, REQ_OPEN_FILE);
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            intent.setType("*/*");
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                            startActivityForResult(intent, REQ_OPEN_FILE);
+                        } catch (Exception ignored) {
+                        }
                     });
                     return "ok";
                 }
                 case "pick_image": {
                     runOnUiThread(() -> {
-                        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                        intent.addCategory(Intent.CATEGORY_OPENABLE);
-                        intent.setType("image/*");
-                        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
-                                "image/png", "image/jpeg", "image/webp", "image/svg+xml"
-                        });
-                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                        startActivityForResult(intent, REQ_PICK_IMAGE);
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            intent.setType("image/*");
+                            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                                    "image/png", "image/jpeg", "image/webp", "image/svg+xml"
+                            });
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                            startActivityForResult(intent, REQ_PICK_IMAGE);
+                        } catch (Exception ignored) {
+                        }
                     });
                     return "ok";
                 }
@@ -313,23 +318,29 @@ public class FigCraftActivity extends GameActivity {
                     String name = parts.length > 0 && !parts[0].isEmpty() ? parts[0] : "design.figcraft";
                     String mime = parts.length > 1 && !parts[1].isEmpty() ? parts[1] : "application/octet-stream";
                     runOnUiThread(() -> {
-                        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-                        intent.addCategory(Intent.CATEGORY_OPENABLE);
-                        intent.setType(mime);
-                        intent.putExtra(Intent.EXTRA_TITLE, name);
-                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-                        startActivityForResult(intent, REQ_SAVE_AS);
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            intent.setType(mime);
+                            intent.putExtra(Intent.EXTRA_TITLE, name);
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                            startActivityForResult(intent, REQ_SAVE_AS);
+                        } catch (Exception ignored) {
+                        }
                     });
                     return "ok";
                 }
                 case "pick_fonts_dir": {
                     runOnUiThread(() -> {
-                        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-                        startActivityForResult(intent, REQ_PICK_FONTS_DIR);
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                            startActivityForResult(intent, REQ_PICK_FONTS_DIR);
+                        } catch (Exception ignored) {
+                        }
                     });
                     return "ok";
                 }
@@ -365,8 +376,11 @@ public class FigCraftActivity extends GameActivity {
                 }
                 case "open_url": {
                     runOnUiThread(() -> {
-                        Intent browser = new Intent(Intent.ACTION_VIEW, Uri.parse(arg));
-                        startActivity(browser);
+                        try {
+                            Intent browser = new Intent(Intent.ACTION_VIEW, Uri.parse(arg));
+                            startActivity(browser);
+                        } catch (Exception ignored) {
+                        }
                     });
                     return "ok";
                 }
@@ -377,6 +391,15 @@ public class FigCraftActivity extends GameActivity {
                 case "start_mcp_service": {
                     runOnUiThread(() -> {
                         try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                                    && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                                    != PackageManager.PERMISSION_GRANTED) {
+                                ActivityCompat.requestPermissions(
+                                        this,
+                                        new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                                        REQ_POST_NOTIFICATIONS
+                                );
+                            }
                             Intent svc = new Intent(this, McpForegroundService.class);
                             svc.putExtra(McpForegroundService.EXTRA_ENDPOINT, arg);
                             ContextCompat.startForegroundService(this, svc);
@@ -388,6 +411,10 @@ public class FigCraftActivity extends GameActivity {
                 }
                 case "stop_mcp_service": {
                     stopService(new Intent(this, McpForegroundService.class));
+                    return "ok";
+                }
+                case "save_crash_log": {
+                    FigCraftApp.reportNativeError(this, arg);
                     return "ok";
                 }
                 default:
