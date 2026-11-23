@@ -15,7 +15,7 @@ figcraft-engine = { path = "../../crates/engine" }
 figcraft-ui-egui = { path = "../../crates/ui-egui", default-features = false }
 figcraft-mcp = { path = "../../crates/mcp" }
 
-# UI / Windowing (AccessKit disabled on Android; GameActivity enabled for IME & Stylus)
+# UI / Windowing (uses workspace-patched storytold/egui 0.37; AccessKit disabled on Android)
 eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "android-game-activity",
@@ -31,5 +31,5 @@ android_logger = "0.15"
 jni = "0.21"
 winit = { version = "0.30", features = ["android-game-activity"] }
 
-[dev-dependencies]
-# Host-side unit tests for protocol, touch state machine, and MCP JSON-RPC framing
+[lints]
+workspace = true
