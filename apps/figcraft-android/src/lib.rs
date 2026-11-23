@@ -18,8 +18,6 @@ use android_activity::AndroidApp;
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 pub fn android_main(app: AndroidApp) {
-    use winit::platform::android::EventLoopBuilderExtAndroid;
-
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
@@ -35,9 +33,7 @@ pub fn android_main(app: AndroidApp) {
     let app_for_loop = app.clone();
     let native_options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        event_loop_builder: Some(Box::new(move |builder| {
-            builder.with_android_app(app_for_loop);
-        })),
+        android_app: Some(app_for_loop),
         ..Default::default()
     };
 
