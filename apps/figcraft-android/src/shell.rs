@@ -1,4 +1,4 @@
-//! Main `eframe::App` wrapper hosting FigCraft's UI inside Android `GameActivity` (V6_hotfix2 · egui 0.37).
+//! Main `eframe::App` wrapper hosting FigCraft's UI inside Android `GameActivity` (V6_hotfix3 · egui 0.37).
 
 use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig, PendingMcpRequest};
 use crate::platform;
@@ -281,7 +281,7 @@ impl FigcraftAndroidShell {
                 "result": {
                     "content": [{
                         "type": "text",
-                        "text": "Wired to FigCraft Android shell (V6_hotfix2). Connect figcraft_mcp::Server to live engine."
+                        "text": "Wired to FigCraft Android shell (V6_hotfix3). Connect figcraft_mcp::Server to live engine."
                     }]
                 }
             }),
@@ -348,7 +348,7 @@ impl eframe::App for FigcraftAndroidShell {
         let ppp = ctx.pixels_per_point().max(1.0);
         self.tablet_input.set_pixels_per_point(ppp);
 
-        if !self.restore_focus_before_paste && ctx.wants_keyboard_input() {
+        if !self.restore_focus_before_paste && ctx.egui_wants_keyboard_input() {
             if let Some(focused) = ctx.memory(|m| m.focused()) {
                 self.last_focused_id = Some(focused);
             }
@@ -435,7 +435,7 @@ impl eframe::App for FigcraftAndroidShell {
 
         let central_resp = egui::CentralPanel::default().show(ui, |ui| {
             ui.centered_and_justified(|ui| {
-                ui.label("FigCraft Android ARM64 Tablet Canvas V6_hotfix2");
+                ui.label("FigCraft Android ARM64 Tablet Canvas V6_hotfix3");
             });
         });
         self.tablet_input.canvas_rect = Some(central_resp.response.rect);
