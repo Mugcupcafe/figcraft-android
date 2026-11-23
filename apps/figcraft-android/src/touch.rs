@@ -101,7 +101,7 @@ impl Default for TabletInputState {
             suppressed_touch_id: None,
             last_tap: None,
             last_sent_modifiers: egui::Modifiers::NONE,
-            shortcut_pad_id: egui::Id::unique(),
+            shortcut_pad_id: egui::Id::unique("figcraft_tablet_shortcut_pad"),
         }
     }
 }
