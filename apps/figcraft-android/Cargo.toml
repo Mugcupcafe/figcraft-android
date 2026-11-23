@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 figcraft-engine = { path = "../../crates/engine" }
 figcraft-ui-egui = { path = "../../crates/ui-egui", default-features = false }
 figcraft-text = { path = "../../crates/text" }
+figcraft-collab-net = { path = "../../crates/collab-net" }
+figcraft-format = { path = "../../crates/format" }
 
 eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
