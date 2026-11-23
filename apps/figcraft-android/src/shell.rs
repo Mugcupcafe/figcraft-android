@@ -13,6 +13,22 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+struct DriveCanvasItem {
+    #[serde(default)]
+    file_id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    modified_time: String,
+    #[serde(default)]
+    local_path: String,
+    #[serde(default)]
+    thumb_path: String,
+    #[serde(default)]
+    synced: bool,
+}
+
 enum LoadedAsset {
     Document {
         display_name: String,
@@ -73,7 +89,7 @@ impl Services for AndroidFigServices {
     }
 
     fn clipboard_get_png(&mut self) -> Option<Vec<u8>> {
-        self.pasted_png.lock().ok().and_then(|mut g| g.take())
+        self.pasted_png.lock().ok().and_then(|g| g.clone())
     }
 
     fn open_url(&mut self, url: &str) {
@@ -105,8 +121,12 @@ pub struct FigcraftAndroidShell {
     mcp_endpoint_label: String,
     status_banner: Option<String>,
     pending_paste_text: Option<String>,
-    pending_dropped_files: Vec<egui::DroppedFile>,
     pasted_png: Arc<Mutex<Option<Vec<u8>>>>,
+    drive_window_open: bool,
+    drive_signed_in: bool,
+    drive_email: String,
+    drive_status: String,
+    drive_items: Vec<DriveCanvasItem>,
     last_focused_id: Option<egui::Id>,
     restore_focus_before_paste: bool,
     asset_tx: mpsc::Sender<LoadedAsset>,
@@ -224,8 +244,12 @@ impl FigcraftAndroidShell {
             mcp_endpoint_label,
             status_banner,
             pending_paste_text: None,
-            pending_dropped_files: Vec::new(),
             pasted_png,
+            drive_window_open: false,
+            drive_signed_in: false,
+            drive_email: String::new(),
+            drive_status: String::new(),
+            drive_items: Vec::new(),
             last_focused_id: None,
             restore_focus_before_paste: false,
             asset_tx,
@@ -339,6 +363,9 @@ impl FigcraftAndroidShell {
         }
         self.last_recovery_stamps = stamps;
         self.last_recovery_save = std::time::Instant::now();
+        if self.prefs.drive_auto_sync && self.drive_signed_in {
+            self.upload_active_canvas_to_drive();
+        }
 
         let copies: Vec<_> = self
             .fig
@@ -523,6 +550,15 @@ impl FigcraftAndroidShell {
             ToolbarButtonId::UiFont => {
                 if ui.add(egui::Button::new("앱 폰트").min_size(egui::vec2(56.0, h))).clicked() {
                     let _ = self.services.request_pick_ui_font();
+                }
+            }
+            ToolbarButtonId::Drive => {
+                let label = if self.drive_signed_in { "드라이브 ●" } else { "드라이브" };
+                if ui.add(egui::Button::new(label).min_size(egui::vec2(72.0, h))).clicked() {
+                    self.drive_window_open = !self.drive_window_open;
+                    if self.drive_window_open && self.drive_signed_in {
+                        self.services.drive_sync_now();
+                    }
                 }
             }
             ToolbarButtonId::Mcp => {
@@ -908,6 +944,23 @@ impl FigcraftAndroidShell {
                     self.mcp_lan_mode = false;
                     self.status_banner = Some("MCP stopped from notification".into());
                 }
+                ActivityEvent::DriveAuth { signed_in, email } => {
+                    self.drive_signed_in = signed_in;
+                    self.drive_email = email;
+                }
+                ActivityEvent::DriveIndex(raw) => {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&raw) {
+                        if let Some(arr) = parsed.get("items").and_then(|v| serde_json::from_value::<Vec<DriveCanvasItem>>(v.clone()).ok()) {
+                            self.drive_items = arr;
+                        }
+                    }
+                }
+                ActivityEvent::DriveStatus(msg) => {
+                    if !msg.is_empty() {
+                        self.drive_status = msg.clone();
+                        self.status_banner = Some(msg);
+                    }
+                }
             }
         }
 
@@ -931,13 +984,13 @@ impl FigcraftAndroidShell {
                     bytes,
                 } => {
                     let kb = bytes.len() / 1024;
-                    self.pending_dropped_files.push(egui::DroppedFile {
-                        path: None,
-                        name: display_name.clone(),
-                        mime: mime.clone(),
-                        last_modified: None,
-                        bytes: Some(Arc::from(bytes)),
-                    });
+                    if let Ok(mut slot) = self.pasted_png.lock() {
+                        *slot = Some(bytes);
+                    }
+                    self.fig.run("edit.paste", json!({}));
+                    if let Ok(mut slot) = self.pasted_png.lock() {
+                        *slot = None;
+                    }
                     self.status_banner = Some(format!("Imported {display_name} ({mime}, {kb} KB)"));
                 }
                 LoadedAsset::Err {
@@ -1040,6 +1093,199 @@ impl FigcraftAndroidShell {
     }
 }
 
+    fn upload_active_canvas_to_drive(&mut self) {
+        let Some(dir) = self.java_files_dir.clone() else { return; };
+        let cache_dir = dir.join("drive_cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let Some(doc_state) = self.fig.session.docs.get(self.fig.session.active) else { return; };
+        let raw_name = if doc_state.name.trim().is_empty() { "Untitled" } else { doc_state.name.trim() };
+        let safe_name: String = raw_name
+            .chars()
+            .map(|c| if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+            .collect();
+        let file_name = if safe_name.ends_with(".figcraft") { safe_name } else { format!("{safe_name}.figcraft") };
+        let local_fig = cache_dir.join(&file_name);
+        let history = doc_state.history_snapshot();
+        if let Ok(bytes) = figcraft_format::save_bytes_with_history(&doc_state.doc, &history) {
+            if std::fs::write(&local_fig, bytes).is_ok() {
+                self.services.drive_upload_canvas(&file_name, &local_fig.to_string_lossy(), "");
+            }
+        }
+    }
+
+    fn paint_canvas_card_preview(ui: &mut egui::Ui, size: egui::Vec2, title: &str, synced: bool) {
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 8.0, ui.visuals().extreme_bg_color);
+        p.rect_stroke(rect, 8.0, egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color), egui::StrokeKind::Inside);
+        let bar = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 10.0), egui::vec2(size.x - 20.0, 10.0));
+        p.rect_filled(bar, 3.0, egui::Color32::from_rgba_unmultiplied(76, 175, 80, 70));
+        let box1 = egui::Rect::from_min_size(rect.min + egui::vec2(10.0, 26.0), egui::vec2((size.x - 26.0) * 0.55, size.y - 36.0));
+        let box2 = egui::Rect::from_min_size(egui::pos2(box1.max.x + 6.0, box1.min.y), egui::vec2((size.x - 26.0) * 0.45, size.y - 36.0));
+        p.rect_filled(box1, 4.0, ui.visuals().faint_bg_color);
+        p.rect_filled(box2, 4.0, ui.visuals().faint_bg_color);
+        let badge = if synced { "Drive" } else { "로컬" };
+        p.text(
+            rect.right_bottom() - egui::vec2(8.0, 6.0),
+            egui::Align2::RIGHT_BOTTOM,
+            badge,
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_rgb(76, 175, 80),
+        );
+        let _ = title;
+    }
+
+    fn show_home_drive_strip(&mut self, ctx: &egui::Context) {
+        let mut open_req: Option<(String, String)> = None;
+        let mut open_page = false;
+        egui::TopBottomPanel::bottom("android_home_drive_recents")
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Google Drive 최근 캔버스").strong().size(13.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Google Drive 페이지 열기").clicked() {
+                            open_page = true;
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                let items = self.drive_items.clone();
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for item in items.iter().take(12) {
+                            let title = item.name.strip_suffix(".figcraft").unwrap_or(&item.name);
+                            egui::Frame::group(ui.style())
+                                .inner_margin(egui::Margin::same(8))
+                                .show(ui, |ui| {
+                                    ui.set_width(148.0);
+                                    Self::paint_canvas_card_preview(ui, egui::vec2(132.0, 66.0), title, item.synced);
+                                    ui.add_space(4.0);
+                                    ui.label(egui::RichText::new(title).strong().size(12.5));
+                                    if ui.small_button("열기").clicked() {
+                                        open_req = Some((item.file_id.clone(), item.name.clone()));
+                                    }
+                                });
+                        }
+                    });
+                });
+            });
+        if open_page {
+            self.drive_window_open = true;
+        }
+        if let Some((fid, name)) = open_req {
+            self.services.drive_open_file(&fid, &name);
+            self.fig.ui.home = false;
+        }
+    }
+
+    fn show_drive_window(&mut self, ctx: &egui::Context) {
+        if !self.drive_window_open {
+            return;
+        }
+        let mut open = self.drive_window_open;
+        let mut do_sign_in = false;
+        let mut do_sign_out = false;
+        let mut do_sync = false;
+        let mut do_upload = false;
+        let mut prefs_changed = false;
+        let mut open_req: Option<(String, String)> = None;
+
+        egui::Window::new("Google Drive (FigCraft 폴더)")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(520.0)
+            .default_height(460.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if self.drive_signed_in {
+                        let who = if self.drive_email.is_empty() { "연결됨".to_string() } else { self.drive_email.clone() };
+                        ui.label(egui::RichText::new(format!("계정: {who}")).strong());
+                        if ui.button("로그아웃").clicked() {
+                            do_sign_out = true;
+                        }
+                    } else {
+                        ui.label("OAuth Client ID:");
+                        if ui.add(egui::TextEdit::singleline(&mut self.prefs.drive_client_id).desired_width(240.0).hint_text("xxxx.apps.googleusercontent.com")).changed() {
+                            prefs_changed = true;
+                        }
+                        if ui.button("Google 로그인").clicked() {
+                            do_sign_in = true;
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut self.prefs.drive_auto_sync, "자동 업로드 및 동기화 (FigCraft 폴더)").changed() {
+                        prefs_changed = true;
+                    }
+                    if self.drive_signed_in {
+                        if ui.button("지금 동기화").clicked() {
+                            do_sync = true;
+                        }
+                        if ui.button("현재 캔버스 업로드").clicked() {
+                            do_upload = true;
+                        }
+                    }
+                });
+                if !self.drive_status.is_empty() {
+                    ui.label(egui::RichText::new(&self.drive_status).size(11.5).weak());
+                }
+                ui.separator();
+
+                let items = self.drive_items.clone();
+                if items.is_empty() {
+                    ui.label("드라이브의 FigCraft 폴더에 저장된 캔버스가 아직 없습니다.");
+                } else {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for item in &items {
+                                let title = item.name.strip_suffix(".figcraft").unwrap_or(&item.name);
+                                egui::Frame::group(ui.style())
+                                    .inner_margin(egui::Margin::same(8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(152.0);
+                                        Self::paint_canvas_card_preview(ui, egui::vec2(136.0, 72.0), title, item.synced);
+                                        ui.add_space(4.0);
+                                        ui.label(egui::RichText::new(title).strong().size(13.0));
+                                        if !item.modified_time.is_empty() {
+                                            let short_date: String = item.modified_time.chars().take(10).collect();
+                                            ui.label(egui::RichText::new(short_date).size(11.0).weak());
+                                        }
+                                        if ui.button("캔버스 열기").clicked() {
+                                            open_req = Some((item.file_id.clone(), item.name.clone()));
+                                        }
+                                    });
+                            }
+                        });
+                    });
+                }
+            });
+
+        self.drive_window_open = open;
+        if prefs_changed {
+            self.services.save_prefs(&self.prefs);
+        }
+        if do_sign_in {
+            self.services.save_prefs(&self.prefs);
+            self.services.drive_sign_in(&self.prefs.drive_client_id);
+        }
+        if do_sign_out {
+            self.services.drive_sign_out();
+        }
+        if do_sync {
+            self.services.drive_sync_now();
+        }
+        if do_upload {
+            self.upload_active_canvas_to_drive();
+        }
+        if let Some((fid, name)) = open_req {
+            self.services.drive_open_file(&fid, &name);
+            self.drive_window_open = false;
+            self.fig.ui.home = false;
+        }
+    }
+
 impl eframe::App for FigcraftAndroidShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         figcraft_ui_egui::windows::guard(&mut self.fig, ctx, |fig| fig.background_tick(ctx));
@@ -1068,9 +1314,7 @@ impl eframe::App for FigcraftAndroidShell {
         if !self.pending_egui_events.is_empty() {
             raw_input.events.extend(self.pending_egui_events.drain(..));
         }
-        if !self.pending_dropped_files.is_empty() {
-            raw_input.dropped_files.extend(self.pending_dropped_files.drain(..));
-        }
+
 
         if let Some(text) = self.pending_paste_text.take() {
             if self.restore_focus_before_paste {
@@ -1198,12 +1442,15 @@ impl eframe::App for FigcraftAndroidShell {
 
         self.show_toolbar_editor_window(&ctx);
         self.show_mouse_settings_window(&ctx);
+        self.show_drive_window(&ctx);
+        if self.fig.ui.home && !self.drive_items.is_empty() {
+            self.show_home_drive_strip(&ctx);
+        }
         self.tablet_input.paint_virtual_cursor(&ctx);
 
         if self.tablet_input.needs_repaint()
             || self.pending_paste_text.is_some()
             || !self.pending_egui_events.is_empty()
-            || !self.pending_dropped_files.is_empty()
             || self.mcp_server.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
