@@ -105,6 +105,7 @@ pub struct FigcraftAndroidShell {
     mcp_endpoint_label: String,
     status_banner: Option<String>,
     pending_paste_text: Option<String>,
+    pending_dropped_files: Vec<egui::DroppedFile>,
     pasted_png: Arc<Mutex<Option<Vec<u8>>>>,
     last_focused_id: Option<egui::Id>,
     restore_focus_before_paste: bool,
@@ -223,6 +224,7 @@ impl FigcraftAndroidShell {
             mcp_endpoint_label,
             status_banner,
             pending_paste_text: None,
+            pending_dropped_files: Vec::new(),
             pasted_png,
             last_focused_id: None,
             restore_focus_before_paste: false,
@@ -813,6 +815,8 @@ impl FigcraftAndroidShell {
                     }));
                 }
                 ActivityEvent::ImeCommit(text) => {
+                    let preview: String = text.chars().take(12).collect();
+                    self.status_banner = Some(format!("IME: {preview}"));
                     if self.ime_composing {
                         self.ime_composing = false;
                         self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(text)));
@@ -857,6 +861,14 @@ impl FigcraftAndroidShell {
                     mime,
                 } => {
                     self.status_banner = Some(format!("Importing {display_name}..."));
+                    self.spawn_async_image_read(path, display_name, mime);
+                }
+                ActivityEvent::DropImage {
+                    path,
+                    display_name,
+                    mime,
+                } => {
+                    self.status_banner = Some(format!("이미지 배치 중: {display_name}"));
                     self.spawn_async_image_read(path, display_name, mime);
                 }
                 ActivityEvent::ClipboardText(text) => {
@@ -919,10 +931,13 @@ impl FigcraftAndroidShell {
                     bytes,
                 } => {
                     let kb = bytes.len() / 1024;
-                    if let Ok(mut slot) = self.pasted_png.lock() {
-                        *slot = Some(bytes);
-                    }
-                    self.fig.run("edit.paste", json!({}));
+                    self.pending_dropped_files.push(egui::DroppedFile {
+                        path: None,
+                        name: display_name.clone(),
+                        mime: mime.clone(),
+                        last_modified: None,
+                        bytes: Some(Arc::from(bytes)),
+                    });
                     self.status_banner = Some(format!("Imported {display_name} ({mime}, {kb} KB)"));
                 }
                 LoadedAsset::Err {
@@ -1048,8 +1063,13 @@ impl eframe::App for FigcraftAndroidShell {
         let control_events = figcraft_ui_egui::windows::take_input(&mut self.fig, raw_input.viewport_id);
         raw_input.events.extend(control_events);
 
+        self.drain_activity_events();
+
         if !self.pending_egui_events.is_empty() {
             raw_input.events.extend(self.pending_egui_events.drain(..));
+        }
+        if !self.pending_dropped_files.is_empty() {
+            raw_input.dropped_files.extend(self.pending_dropped_files.drain(..));
         }
 
         if let Some(text) = self.pending_paste_text.take() {
@@ -1168,6 +1188,11 @@ impl eframe::App for FigcraftAndroidShell {
         }
         if pad_actions.toggle_ime {
             let show = self.tablet_input.ime_height_px <= 1.0;
+            if show {
+                if let Some(id) = self.last_focused_id {
+                    ctx.memory_mut(|m| m.request_focus(id));
+                }
+            }
             self.services.set_soft_keyboard(show);
         }
 
@@ -1177,6 +1202,8 @@ impl eframe::App for FigcraftAndroidShell {
 
         if self.tablet_input.needs_repaint()
             || self.pending_paste_text.is_some()
+            || !self.pending_egui_events.is_empty()
+            || !self.pending_dropped_files.is_empty()
             || self.mcp_server.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
