@@ -26,6 +26,7 @@ pub enum ToolbarButtonId {
     Fonts,
     UiFont,
     Mcp,
+    Drive,
     CopyToken,
     Pad,
 }
@@ -49,6 +50,7 @@ impl ToolbarButtonId {
         Self::Fonts,
         Self::UiFont,
         Self::Mcp,
+        Self::Drive,
         Self::CopyToken,
         Self::Pad,
     ];
@@ -56,6 +58,7 @@ impl ToolbarButtonId {
     pub fn default_bar() -> Vec<Self> {
         vec![
             Self::Open,
+            Self::Drive,
             Self::Image,
             Self::MultiSelect,
             Self::Copy,
@@ -91,6 +94,7 @@ impl ToolbarButtonId {
             Self::Fonts => "폰트",
             Self::UiFont => "앱 폰트",
             Self::Mcp => "MCP",
+            Self::Drive => "드라이브",
             Self::CopyToken => "토큰 복사",
             Self::Pad => "단축키",
         }
@@ -105,6 +109,10 @@ fn default_mouse_grip_distance() -> f32 {
     52.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AndroidShellPrefs {
     pub ui_zoom_factor: f32,
@@ -115,6 +123,10 @@ pub struct AndroidShellPrefs {
     pub mouse_cursor_scale: f32,
     #[serde(default = "default_mouse_grip_distance")]
     pub mouse_grip_distance: f32,
+    #[serde(default)]
+    pub drive_client_id: String,
+    #[serde(default = "default_true")]
+    pub drive_auto_sync: bool,
 }
 
 impl Default for AndroidShellPrefs {
@@ -125,6 +137,8 @@ impl Default for AndroidShellPrefs {
             toolbar_buttons: ToolbarButtonId::default_bar(),
             mouse_cursor_scale: default_mouse_cursor_scale(),
             mouse_grip_distance: default_mouse_grip_distance(),
+            drive_client_id: String::new(),
+            drive_auto_sync: true,
         }
     }
 }
@@ -323,6 +337,28 @@ impl AndroidServices {
                 let _ = fs::rename(&tmp, &dst);
             }
         }
+    }
+
+    pub fn drive_sign_in(&self, client_id: &str) {
+        let _ = platform::call_activity("drive_sign_in", client_id);
+    }
+
+    pub fn drive_sign_out(&self) {
+        let _ = platform::call_activity("drive_sign_out", "");
+    }
+
+    pub fn drive_sync_now(&self) {
+        let _ = platform::call_activity("drive_sync_now", "");
+    }
+
+    pub fn drive_upload_canvas(&self, name: &str, fig_path: &str, thumb_path: &str) {
+        let arg = format!("{name}{SEP}{fig_path}{SEP}{thumb_path}");
+        let _ = platform::call_activity("drive_upload", &arg);
+    }
+
+    pub fn drive_open_file(&self, file_id: &str, name: &str) {
+        let arg = format!("{file_id}{SEP}{name}");
+        let _ = platform::call_activity("drive_open", &arg);
     }
 
     pub fn font_search_dirs(&self) -> Vec<PathBuf> {
