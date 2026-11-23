@@ -58,6 +58,26 @@ workflows:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
+      - name: Apply FigCraft Mobile wordmark branding
+        script: |
+          python3 - <<"EOF"
+          from pathlib import Path
+          for p in sorted(Path("crates/ui-egui/src").rglob("*.rs")):
+              s = p.read_text(encoding="utf-8")
+              idx = s.find("fn paint_wordmark")
+              if idx == -1:
+                  continue
+              end = s.find("\n}", idx)
+              if end == -1:
+                  continue
+              block = s[idx:end + 2]
+              if '"Fig"' in block and '"Craft"' in block:
+                  new_block = block.replace('"Fig"', '"FigCraft "', 1).replace('"Craft"', '"Mobile"', 1)
+                  p.write_text(s[:idx] + new_block + s[end + 2:], encoding="utf-8")
+                  print(f"Patched paint_wordmark in {p}: FigCraft (base) + Mobile (accent)")
+                  break
+          EOF
+
       - name: Run host unit tests (protocol, touch, mcp_http)
         script: |
           export PATH="$HOME/.cargo/bin:$PATH"
