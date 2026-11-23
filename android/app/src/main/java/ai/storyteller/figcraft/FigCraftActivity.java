@@ -10,6 +10,8 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -84,6 +86,7 @@ public class FigCraftActivity extends GameActivity {
     private volatile long lastStylusUptimeMs = 0L;
     private volatile boolean immersiveEnabled = false;
     private ImeBridgeView imeBridgeView;
+    private DriveSyncManager driveSyncManager;
 
     static {
         try {
@@ -138,6 +141,28 @@ public class FigCraftActivity extends GameActivity {
         applySystemBarIconContrast(!isNight);
         enqueueControl("system_theme" + SEP + (isNight ? "dark" : "light"));
 
+        driveSyncManager = new DriveSyncManager(this, new DriveSyncManager.Listener() {
+            @Override
+            public void onAuthChanged(boolean signedIn, String email) {
+                enqueueControl("drive_auth" + SEP + (signedIn ? "1" : "0") + SEP + (email != null ? email : ""));
+            }
+
+            @Override
+            public void onIndexUpdated(String indexJson) {
+                enqueueControl("drive_index" + SEP + (indexJson != null ? indexJson : "{}"));
+            }
+
+            @Override
+            public void onStatus(String message) {
+                enqueueControl("drive_status" + SEP + (message != null ? message : ""));
+            }
+
+            @Override
+            public void onFileReadyToOpen(String localPath, String displayName) {
+                enqueueControl("file_opened" + SEP + localPath + SEP + displayName);
+            }
+        });
+        driveSyncManager.emitInitialState();
         setupImeBridgeView();
         View rootView = findViewById(android.R.id.content);
         if (rootView == null && getWindow() != null) {
@@ -476,6 +501,41 @@ public class FigCraftActivity extends GameActivity {
                     FigCraftApp.reportNativeError(this, arg);
                     return "ok";
                 }
+                case "drive_sign_in": {
+                    if (driveSyncManager != null) driveSyncManager.startSignIn(arg);
+                    return "ok";
+                }
+                case "drive_sign_out": {
+                    if (driveSyncManager != null) driveSyncManager.signOut();
+                    return "ok";
+                }
+                case "drive_sync_now": {
+                    if (driveSyncManager != null) driveSyncManager.syncAndListAsync();
+                    return "ok";
+                }
+                case "drive_upload": {
+                    if (driveSyncManager != null) {
+                        String[] parts = arg.split(SEP, -1);
+                        if (parts.length >= 2) {
+                            String thumb = parts.length >= 3 ? parts[2] : "";
+                            driveSyncManager.uploadCanvasAsync(parts[0], parts[1], thumb);
+                        }
+                    }
+                    return "ok";
+                }
+                case "drive_open": {
+                    if (driveSyncManager != null) {
+                        String[] parts = arg.split(SEP, -1);
+                        if (parts.length >= 2) {
+                            driveSyncManager.openDriveFileAsync(parts[0], parts[1]);
+                        }
+                    }
+                    return "ok";
+                }
+                case "drive_emit_state": {
+                    if (driveSyncManager != null) driveSyncManager.emitInitialState();
+                    return "ok";
+                }
                 default:
                     return "err" + SEP + "unknown cmd: " + cmd;
             }
@@ -510,13 +570,9 @@ public class FigCraftActivity extends GameActivity {
                 final String finalMime = mime;
                 new Thread(() -> {
                     try {
-                        File staged = new File(getCacheDir(), "clip_" + System.currentTimeMillis() + ".img");
-                        try (InputStream in = getContentResolver().openInputStream(uri);
-                             OutputStream out = new FileOutputStream(staged)) {
-                            if (in != null) {
-                                copyStream(in, out);
-                                enqueueControl("clipboard_image" + SEP + staged.getAbsolutePath() + SEP + finalMime);
-                            }
+                        File staged = new File(getCacheDir(), "clip_" + System.currentTimeMillis() + ".png");
+                        if (writeUriAsPng(uri, staged)) {
+                            enqueueControl("clipboard_image" + SEP + staged.getAbsolutePath() + SEP + "image/png");
                         }
                     } catch (Exception ignored) {
                     }
@@ -580,13 +636,9 @@ public class FigCraftActivity extends GameActivity {
                     final String displayName = ensureImageExtension(queryDisplayName(uri), finalMime, "drop_" + idx);
                     new Thread(() -> {
                         try {
-                            File staged = new File(getCacheDir(), "drop_" + System.currentTimeMillis() + "_" + idx + ".img");
-                            try (InputStream in = getContentResolver().openInputStream(finalUri);
-                                 OutputStream out = new FileOutputStream(staged)) {
-                                if (in != null) {
-                                    copyStream(in, out);
-                                    enqueueControl("drop_image" + SEP + staged.getAbsolutePath() + SEP + displayName + SEP + finalMime);
-                                }
+                            File staged = new File(getCacheDir(), "drop_" + System.currentTimeMillis() + "_" + idx + ".png");
+                            if (writeUriAsPng(finalUri, staged)) {
+                                enqueueControl("drop_image" + SEP + staged.getAbsolutePath() + SEP + displayName + SEP + "image/png");
                             }
                         } catch (Exception ignored) {
                         } finally {
@@ -927,12 +979,10 @@ public class FigCraftActivity extends GameActivity {
             final String finalMime = mime != null ? mime : "image/png";
             new Thread(() -> {
                 try {
-                    File staged = new File(getCacheDir(), "img_" + System.currentTimeMillis() + "_" + safeName);
-                    try (InputStream in = getContentResolver().openInputStream(uri);
-                         OutputStream out = new FileOutputStream(staged)) {
-                        if (in != null) copyStream(in, out);
+                    File staged = new File(getCacheDir(), "img_" + System.currentTimeMillis() + ".png");
+                    if (writeUriAsPng(uri, staged)) {
+                        enqueueControl("image_picked" + SEP + staged.getAbsolutePath() + SEP + displayName + SEP + "image/png");
                     }
-                    enqueueControl("image_picked" + SEP + staged.getAbsolutePath() + SEP + displayName + SEP + finalMime);
                 } catch (Exception ignored) {
                 }
             }).start();
@@ -1054,6 +1104,29 @@ public class FigCraftActivity extends GameActivity {
         if (out == null) throw new IllegalStateException("openOutputStream returned null");
         try (InputStream in = new FileInputStream(source); OutputStream closableOut = out) {
             copyStream(in, closableOut);
+        }
+    }
+
+    private boolean writeUriAsPng(Uri uri, File dest) {
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return false;
+            Bitmap bmp = BitmapFactory.decodeStream(in);
+            if (bmp != null) {
+                try (OutputStream out = new FileOutputStream(dest)) {
+                    boolean ok = bmp.compress(Bitmap.CompressFormat.PNG, 100, out);
+                    bmp.recycle();
+                    if (ok) return true;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             OutputStream out = new FileOutputStream(dest)) {
+            if (in == null) return false;
+            copyStream(in, out);
+            return true;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
