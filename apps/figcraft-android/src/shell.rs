@@ -75,7 +75,6 @@ impl FigcraftAndroidShell {
         let mcp_server = match EmbeddedMcpServer::start(McpServerConfig::default()) {
             Ok(srv) => {
                 mcp_endpoint_label = format!("http://{}/mcp", srv.config.bind_addr);
-                services.set_mcp_foreground_service(true, &mcp_endpoint_label);
                 status_banner = Some(format!("MCP: {mcp_endpoint_label}"));
                 Some(srv)
             }
@@ -435,7 +434,7 @@ impl eframe::App for FigcraftAndroidShell {
 
         let central_resp = egui::CentralPanel::default().show(ui, |ui| {
             ui.centered_and_justified(|ui| {
-                ui.label("FigCraft Android ARM64 Tablet Canvas V6_hotfix3");
+                ui.label("FigCraft Android ARM64 Tablet Shell V7");
             });
         });
         self.tablet_input.canvas_rect = Some(central_resp.response.rect);
