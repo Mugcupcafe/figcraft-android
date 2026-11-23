@@ -1,0 +1,93 @@
+workflows:
+  figcraft-android-arm64:
+    name: FigCraft Android ARM64 Tablet APK
+    max_build_duration: 60
+    instance_type: linux_x2
+    environment:
+      java: 17
+      vars:
+        NDK_VERSION: "27.2.12479018"
+        ANDROID_API: "29"
+        CARGO_TERM_COLOR: "always"
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: "android-port"
+          include: true
+          source: true
+    cache:
+      cache_paths:
+        - $HOME/.cargo/registry
+        - $HOME/.cargo/git
+        - $CM_BUILD_DIR/target
+        - $HOME/.gradle/caches
+    scripts:
+      - name: Install Rust toolchain & aarch64-linux-android target
+        script: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup update stable
+          rustup target add aarch64-linux-android
+          rustc --version
+          cargo --version
+
+      - name: Fetch craft-fonts inside workspace
+        script: |
+          if [ ! -d "$CM_BUILD_DIR/.craft-fonts" ]; then
+            git clone --depth 1 https://github.com/storytold/craft-fonts.git "$CM_BUILD_DIR/.craft-fonts"
+          fi
+
+      - name: Ensure Android NDK & SDK Platform 35 (SIGPIPE-safe)
+        script: |
+          SDK_DIR="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_DIR" -name sdkmanager -type f | head -n 1)"
+          fi
+          (yes || true) | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          (yes || true) | "$SDKMANAGER" \
+            "ndk;${NDK_VERSION}" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Run host unit tests (protocol, touch, mcp_http)
+        script: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          export CRAFT_FONTS_DIR="$CM_BUILD_DIR/.craft-fonts"
+          cargo test -p figcraft-android
+
+      - name: Cross-compile libfigcraft_android.so & bundle libc++_shared.so
+        script: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          SDK_DIR="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          NDK="$SDK_DIR/ndk/${NDK_VERSION}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SYSROOT_LIB="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android"
+
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android${ANDROID_API}-clang"
+          export CC_aarch64_linux_android="$BIN/aarch64-linux-android${ANDROID_API}-clang"
+          export CXX_aarch64_linux_android="$BIN/aarch64-linux-android${ANDROID_API}-clang++"
+          export AR_aarch64_linux_android="$BIN/llvm-ar"
+          export CRAFT_FONTS_DIR="$CM_BUILD_DIR/.craft-fonts"
+
+          cargo build -p figcraft-android --lib --target aarch64-linux-android --release
+
+          JNI_OUT="android/app/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$JNI_OUT"
+          cp target/aarch64-linux-android/release/libfigcraft_android.so "$JNI_OUT/"
+          cp "$SYSROOT_LIB/libc++_shared.so" "$JNI_OUT/"
+          ls -lh "$JNI_OUT"
+
+      - name: Assemble Android ARM64 Debug APK
+        script: |
+          if ! command -v gradle >/dev/null 2>&1; then
+            curl -sL https://services.gradle.org/distributions/gradle-8.10.2-bin.zip -o /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp/gradle
+            export PATH="/tmp/gradle/gradle-8.10.2/bin:$PATH"
+          fi
+          gradle -p android :app:assembleDebug --stacktrace
+    artifacts:
+      - android/app/build/outputs/apk/debug/*.apk
