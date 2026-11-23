@@ -64,12 +64,13 @@ workflows:
           export PATH="$HOME/.cargo/bin:$PATH"
           SDK_DIR="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           NDK="$SDK_DIR/ndk/${NDK_VERSION}"
-          # mac_mini_m2 (free) host tag: NDK 27 ships darwin-arm64 on Apple Silicon,
-          # older NDKs only darwin-x86_64. Detect instead of hard-coding.
-          HOST_TAG="darwin-x86_64"
-          if [ -d "$NDK/toolchains/llvm/prebuilt/darwin-arm64" ]; then HOST_TAG="darwin-arm64"; fi
-          BIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin"
-          SYSROOT_LIB="$NDK/toolchains/llvm/prebuilt/$HOST_TAG/sysroot/usr/lib/aarch64-linux-android"
+          HOST_TAG="linux-x86_64"
+          if [ "$(uname -s)" = "Darwin" ]; then
+            HOST_TAG="darwin-x86_64"
+            if [ -d "$NDK/toolchains/llvm/prebuilt/darwin-arm64" ]; then HOST_TAG="darwin-arm64"; fi
+          fi
+          BIN="$NDK/toolchains/llvm/prebuilt/${HOST_TAG}/bin"
+          SYSROOT_LIB="$NDK/toolchains/llvm/prebuilt/${HOST_TAG}/sysroot/usr/lib/aarch64-linux-android"
 
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android${ANDROID_API}-clang"
           export CC_aarch64_linux_android="$BIN/aarch64-linux-android${ANDROID_API}-clang"
