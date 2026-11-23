@@ -18,8 +18,17 @@ import android.os.SystemClock;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.view.DragAndDropPermissions;
+import android.view.DragEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.text.Editable;
+import android.text.InputType;
+import android.view.KeyEvent;
+import android.view.ViewGroup;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 
 import androidx.core.app.ActivityCompat;
@@ -73,6 +82,7 @@ public class FigCraftActivity extends GameActivity {
     private volatile boolean stylusActive = false;
     private volatile long lastStylusUptimeMs = 0L;
     private volatile boolean immersiveEnabled = false;
+    private ImeBridgeView imeBridgeView;
 
     static {
         try {
@@ -122,10 +132,12 @@ public class FigCraftActivity extends GameActivity {
         super.onCreate(savedInstanceState);
         activeInstance = new WeakReference<>(this);
         copyBundledUiFontIfPresent();
+        enqueueControl("files_dir" + SEP + getFilesDir().getAbsolutePath());
         boolean isNight = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         applySystemBarIconContrast(!isNight);
         enqueueControl("system_theme" + SEP + (isNight ? "dark" : "light"));
 
+        setupImeBridgeView();
         View rootView = findViewById(android.R.id.content);
         if (rootView == null && getWindow() != null) {
             rootView = getWindow().getDecorView();
@@ -148,6 +160,7 @@ public class FigCraftActivity extends GameActivity {
                 return ViewCompat.onApplyWindowInsets(v, insets);
             });
             ViewCompat.requestApplyInsets(rootView);
+            setupCrossAppDragAndDrop(rootView);
         }
     }
 
@@ -168,6 +181,12 @@ public class FigCraftActivity extends GameActivity {
         if (decor != null) {
             decor.post(() -> ViewCompat.requestApplyInsets(decor));
         }
+    }
+
+    @Override
+    protected void onPause() {
+        enqueueControl("app_paused");
+        super.onPause();
     }
 
     @Override
@@ -514,15 +533,244 @@ public class FigCraftActivity extends GameActivity {
         }
     }
 
+    private void setupCrossAppDragAndDrop(View target) {
+        target.setOnDragListener((v, event) -> {
+            if (event == null) return false;
+            switch (event.getAction()) {
+                case DragEvent.ACTION_DRAG_STARTED:
+                    return true;
+                case DragEvent.ACTION_DROP:
+                    handleCrossAppDrop(event);
+                    return true;
+                default:
+                    return true;
+            }
+        });
+    }
+
+    private void handleCrossAppDrop(DragEvent event) {
+        ClipData clip = event.getClipData();
+        if (clip == null || clip.getItemCount() == 0) return;
+
+        final DragAndDropPermissions perms = requestDragAndDropPermissions(event);
+        ClipDescription desc = clip.getDescription();
+
+        boolean spawnedAsync = false;
+        for (int i = 0; i < clip.getItemCount(); i++) {
+            ClipData.Item item = clip.getItemAt(i);
+            if (item == null) continue;
+            Uri uri = item.getUri();
+            if (uri != null) {
+                String mime = getContentResolver().getType(uri);
+                if (mime == null && desc != null) {
+                    for (int m = 0; m < desc.getMimeTypeCount(); m++) {
+                        String cand = desc.getMimeType(m);
+                        if (cand != null && cand.startsWith("image/")) {
+                            mime = cand;
+                            break;
+                        }
+                    }
+                }
+                if (mime != null && mime.startsWith("image/")) {
+                    spawnedAsync = true;
+                    final String finalMime = mime;
+                    final Uri finalUri = uri;
+                    final int idx = i;
+                    new Thread(() -> {
+                        try {
+                            File staged = new File(getCacheDir(), "drop_" + System.currentTimeMillis() + "_" + idx + ".img");
+                            try (InputStream in = getContentResolver().openInputStream(finalUri);
+                                 OutputStream out = new FileOutputStream(staged)) {
+                                if (in != null) {
+                                    copyStream(in, out);
+                                    enqueueControl("clipboard_image" + SEP + staged.getAbsolutePath() + SEP + finalMime);
+                                }
+                            }
+                        } catch (Exception ignored) {
+                        } finally {
+                            if (perms != null) {
+                                try {
+                                    perms.release();
+                                } catch (Exception ignored) {
+                                }
+                            }
+                        }
+                    }).start();
+                    continue;
+                }
+            }
+
+            CharSequence text = item.coerceToText(this);
+            if (text != null && text.length() > 0) {
+                String str = text.length() > MAX_CLIPBOARD_TEXT_CHARS
+                        ? text.subSequence(0, MAX_CLIPBOARD_TEXT_CHARS).toString()
+                        : text.toString();
+                enqueueControl("clipboard_text" + SEP + str);
+            }
+        }
+
+        if (!spawnedAsync && perms != null) {
+            try {
+                perms.release();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void setupImeBridgeView() {
+        try {
+            ViewGroup content = findViewById(android.R.id.content);
+            if (content == null || imeBridgeView != null) return;
+            imeBridgeView = new ImeBridgeView(this);
+            ViewGroup.LayoutParams lp = new ViewGroup.LayoutParams(1, 1);
+            content.addView(imeBridgeView, lp);
+        } catch (Exception ignored) {
+        }
+    }
+
     private void toggleSoftKeyboard(boolean show) {
-        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
-        if (imm == null) return;
-        View view = getWindow().getDecorView();
-        if (show) {
-            view.requestFocus();
-            imm.showSoftInput(view, InputMethodManager.SHOW_FORCED);
-        } else {
-            imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
+        try {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm == null) return;
+            if (imeBridgeView == null) {
+                setupImeBridgeView();
+            }
+            View target = imeBridgeView != null ? imeBridgeView : getWindow().getDecorView();
+            if (target == null) return;
+            if (show) {
+                target.setFocusable(true);
+                target.setFocusableInTouchMode(true);
+                target.requestFocus();
+                if (imeBridgeView != null) {
+                    imeBridgeView.resetComposing();
+                }
+                imm.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT);
+                enqueueControl("ime_state" + SEP + "1");
+            } else {
+                imm.hideSoftInputFromWindow(target.getWindowToken(), 0);
+                target.clearFocus();
+                enqueueControl("ime_state" + SEP + "0");
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Hidden 1x1 native Android View providing a full BaseInputConnection so Korean IME
+     * composition, English, numbers, symbols, Backspace, and Enter are reliably delivered to egui.
+     */
+    private class ImeBridgeView extends View {
+        private String lastComposing = "";
+
+        ImeBridgeView(Context context) {
+            super(context);
+            setFocusable(true);
+            setFocusableInTouchMode(true);
+            setAlpha(0f);
+        }
+
+        void resetComposing() {
+            lastComposing = "";
+        }
+
+        @Override
+        public boolean onCheckIsTextEditor() {
+            return true;
+        }
+
+        @Override
+        public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+            outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_ACTION_DONE;
+            return new BaseInputConnection(this, true) {
+                @Override
+                public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                    String s = text != null ? text.toString() : "";
+                    lastComposing = s;
+                    enqueueControl("ime_preedit" + SEP + s);
+                    return super.setComposingText(text, newCursorPosition);
+                }
+
+                @Override
+                public boolean commitText(CharSequence text, int newCursorPosition) {
+                    String s = text != null ? text.toString() : "";
+                    lastComposing = "";
+                    if (!s.isEmpty()) {
+                        enqueueControl("ime_commit" + SEP + s);
+                    }
+                    Editable ed = getEditable();
+                    if (ed != null && ed.length() > 64) {
+                        ed.clear();
+                    }
+                    return super.commitText(text, newCursorPosition);
+                }
+
+                @Override
+                public boolean finishComposingText() {
+                    if (!lastComposing.isEmpty()) {
+                        String committed = lastComposing;
+                        lastComposing = "";
+                        enqueueControl("ime_commit" + SEP + committed);
+                    }
+                    return super.finishComposingText();
+                }
+
+                @Override
+                public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+                    if (!lastComposing.isEmpty()) {
+                        lastComposing = "";
+                        enqueueControl("ime_preedit" + SEP);
+                    }
+                    int count = Math.max(0, Math.min(beforeLength, 16));
+                    for (int i = 0; i < count; i++) {
+                        enqueueControl("ime_key" + SEP + "backspace");
+                    }
+                    return super.deleteSurroundingText(beforeLength, afterLength);
+                }
+
+                @Override
+                public boolean performEditorAction(int editorAction) {
+                    if (!lastComposing.isEmpty()) {
+                        String committed = lastComposing;
+                        lastComposing = "";
+                        enqueueControl("ime_commit" + SEP + committed);
+                    }
+                    enqueueControl("ime_key" + SEP + "enter");
+                    return true;
+                }
+
+                @Override
+                public boolean sendKeyEvent(KeyEvent event) {
+                    if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        int code = event.getKeyCode();
+                        if (code == KeyEvent.KEYCODE_DEL) {
+                            enqueueControl("ime_key" + SEP + "backspace");
+                            return true;
+                        } else if (code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                            if (!lastComposing.isEmpty()) {
+                                String committed = lastComposing;
+                                lastComposing = "";
+                                enqueueControl("ime_commit" + SEP + committed);
+                            }
+                            enqueueControl("ime_key" + SEP + "enter");
+                            return true;
+                        } else if (code == KeyEvent.KEYCODE_TAB) {
+                            enqueueControl("ime_key" + SEP + "tab");
+                            return true;
+                        } else if (code == KeyEvent.KEYCODE_ESCAPE) {
+                            enqueueControl("ime_key" + SEP + "escape");
+                            return true;
+                        } else {
+                            int ch = event.getUnicodeChar();
+                            if (ch >= 32) {
+                                enqueueControl("ime_commit" + SEP + String.valueOf((char) ch));
+                                return true;
+                            }
+                        }
+                    }
+                    return super.sendKeyEvent(event);
+                }
+            };
         }
     }
 
