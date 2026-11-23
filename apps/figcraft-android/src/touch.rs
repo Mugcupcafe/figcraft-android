@@ -72,6 +72,7 @@ pub struct TabletInputState {
     suppressed_touch_id: Option<egui::TouchId>,
     last_tap: Option<(Instant, egui::Pos2)>,
     last_sent_modifiers: egui::Modifiers,
+    shortcut_pad_id: egui::Id,
 }
 
 impl Default for TabletInputState {
@@ -100,6 +101,7 @@ impl Default for TabletInputState {
             suppressed_touch_id: None,
             last_tap: None,
             last_sent_modifiers: egui::Modifiers::NONE,
+            shortcut_pad_id: egui::Id::unique(),
         }
     }
 }
@@ -421,7 +423,7 @@ impl TabletInputState {
         let btn_w = ((max_pad_w - 92.0) / 9.0).clamp(38.0, 48.0);
         let btn_size = egui::vec2(btn_w, 38.0);
 
-        let area_resp = egui::Area::new(egui::Id::from("figcraft_tablet_shortcut_pad"))
+        let area_resp = egui::Area::new(self.shortcut_pad_id)
             .anchor(
                 egui::Align2::LEFT_BOTTOM,
                 egui::vec2(left_margin, -bottom_margin),
