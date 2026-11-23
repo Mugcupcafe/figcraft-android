@@ -65,6 +65,7 @@ pub struct TabletInputState {
     pub show_shortcut_pad: bool,
     pub long_press_enabled: bool,
     pub mouse_cursor_mode: bool,
+    pub multi_select_mode: bool,
     pub virtual_cursor_pos: egui::Pos2,
     pub stylus_active: bool,
     pub last_stylus_time: Option<Instant>,
@@ -77,6 +78,7 @@ pub struct TabletInputState {
     pub pixels_per_point: f32,
     pub top_bar_bottom_pt: f32,
     pub shortcut_pad_rect: Option<egui::Rect>,
+    pub shortcut_pad_pos: Option<egui::Pos2>,
     pub canvas_rect: Option<egui::Rect>,
     pub screen_rect: egui::Rect,
 
@@ -101,6 +103,7 @@ impl Default for TabletInputState {
             show_shortcut_pad: true,
             long_press_enabled: true,
             mouse_cursor_mode: false,
+            multi_select_mode: false,
             virtual_cursor_pos: egui::pos2(300.0, 300.0),
             stylus_active: false,
             last_stylus_time: None,
@@ -113,6 +116,7 @@ impl Default for TabletInputState {
             pixels_per_point: 2.0,
             top_bar_bottom_pt: 52.0,
             shortcut_pad_rect: None,
+            shortcut_pad_pos: None,
             canvas_rect: None,
             screen_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
             active_touches: BTreeMap::new(),
@@ -219,7 +223,10 @@ impl TabletInputState {
     }
 
     pub fn process_raw_input(&mut self, raw_input: &mut egui::RawInput) {
-        let active_modifiers = self.modifiers.to_egui_modifiers();
+        let mut active_modifiers = self.modifiers.to_egui_modifiers();
+        if self.multi_select_mode {
+            active_modifiers.shift = true;
+        }
         let mut synthetic_events: Vec<egui::Event> = Vec::new();
         if active_modifiers != self.last_sent_modifiers {
             self.last_sent_modifiers = active_modifiers;
@@ -383,7 +390,6 @@ impl TabletInputState {
                         modifiers: active_modifiers,
                     });
                 }
-                synthetic_events.push(egui::Event::PointerGone);
             }
             self.was_multi_touch = true;
 
@@ -403,6 +409,8 @@ impl TabletInputState {
             if let (Some(&p1), Some(&p2)) = (iter.next(), iter.next()) {
                 let dist = p1.distance(p2).max(1.0);
                 let center = egui::pos2((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+                // Keep hover_pos anchored at pinch midpoint so FigCraft canvas accepts Zoom & Wheel
+                synthetic_events.push(egui::Event::PointerMoved(center));
 
                 if let (Some(prev_dist), Some(prev_center)) =
                     (self.last_pinch_dist, self.last_pinch_center)
@@ -459,6 +467,15 @@ impl TabletInputState {
             }
         }
 
+        if active_modifiers.any() {
+            for ev in &mut raw_input.events {
+                if let egui::Event::PointerButton { pos, modifiers, .. } = ev {
+                    if !self.is_in_shell_chrome(*pos) {
+                        *modifiers = *modifiers | active_modifiers;
+                    }
+                }
+            }
+        }
         raw_input.events.extend(synthetic_events);
     }
 
@@ -596,6 +613,7 @@ impl TabletInputState {
             if let (Some(&p1), Some(&p2)) = (iter.next(), iter.next()) {
                 let dist = p1.distance(p2).max(1.0);
                 let center = egui::pos2((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
+                synthetic_events.push(egui::Event::PointerMoved(center));
                 if let (Some(prev_dist), Some(prev_center)) =
                     (self.last_pinch_dist, self.last_pinch_center)
                 {
@@ -682,88 +700,133 @@ impl TabletInputState {
         }
 
         let ppp = self.pixels_per_point.max(1.0);
+        let top_min = self.top_bar_bottom_pt + 6.0;
         let right_inset = self.safe_insets_px[1] / ppp;
         let bottom_margin = (self.safe_insets_px[2].max(self.ime_height_px) / ppp) + 12.0;
         let left_margin = (self.safe_insets_px[3] / ppp) + 12.0;
 
-        let screen_w = ctx.input(|i| i.viewport_rect()).width();
-        let max_pad_w = (screen_w - left_margin - right_inset - 12.0).max(200.0);
-        let btn_w = ((max_pad_w - 102.0) / 10.0).clamp(38.0, 48.0);
-        let btn_size = egui::vec2(btn_w, 38.0);
+        let vp = ctx.input(|i| i.viewport_rect());
+        let screen_w = vp.width().max(320.0);
+        let screen_h = vp.height().max(320.0);
+        let max_pad_w = (screen_w - left_margin - right_inset - 12.0).max(260.0);
+        let pad_h = 52.0;
+
+        let default_pos = egui::pos2(left_margin, (screen_h - bottom_margin - pad_h).max(top_min));
+        let mut pad_pos = self.shortcut_pad_pos.unwrap_or(default_pos);
+        let est_w = self
+            .shortcut_pad_rect
+            .map(|r| r.width())
+            .unwrap_or(560.0)
+            .min(max_pad_w);
+        pad_pos.x = pad_pos.x.clamp(left_margin, (screen_w - right_inset - est_w).max(left_margin));
+        pad_pos.y = pad_pos.y.clamp(top_min, (screen_h - bottom_margin - pad_h).max(top_min));
+
+        let mut drag_delta = egui::Vec2::ZERO;
+        let btn_h = 36.0;
+        let handle_size = egui::vec2(26.0, btn_h);
 
         let area_resp = egui::Area::new(self.shortcut_pad_id)
-            .anchor(
-                egui::Align2::LEFT_BOTTOM,
-                egui::vec2(left_margin, -bottom_margin),
-            )
+            .fixed_pos(pad_pos)
+            .order(egui::Order::Foreground)
             .interactable(true)
             .show(ctx, |ui| {
                 ui.set_max_width(max_pad_w);
                 egui::Frame::window(ui.style())
                     .corner_radius(egui::CornerRadius::same(14))
-                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .inner_margin(egui::Margin::symmetric(6, 6))
                     .show(ui, |ui| {
-                        egui::ScrollArea::horizontal()
-                            .id_salt("shortcut_pad_scroll")
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 5.0;
-                                    if ui
-                                        .add_sized(btn_size, egui::Button::new("Shift").selected(self.modifiers.shift))
-                                        .clicked()
-                                    {
-                                        self.modifiers.shift = !self.modifiers.shift;
-                                    }
-                                    if ui
-                                        .add_sized(btn_size, egui::Button::new("Ctrl").selected(self.modifiers.ctrl))
-                                        .clicked()
-                                    {
-                                        self.modifiers.ctrl = !self.modifiers.ctrl;
-                                    }
-                                    if ui
-                                        .add_sized(btn_size, egui::Button::new("Alt").selected(self.modifiers.alt))
-                                        .clicked()
-                                    {
-                                        self.modifiers.alt = !self.modifiers.alt;
-                                    }
-                                    if ui
-                                        .add_sized(btn_size, egui::Button::new("Hand").selected(self.modifiers.space_pan))
-                                        .clicked()
-                                    {
-                                        self.modifiers.space_pan = !self.modifiers.space_pan;
-                                    }
-                                    if ui
-                                        .add_sized(btn_size, egui::Button::new("Draw").selected(!self.long_press_enabled))
-                                        .clicked()
-                                    {
-                                        self.long_press_enabled = !self.long_press_enabled;
-                                        if !self.long_press_enabled {
-                                            self.long_press = None;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 5.0;
+
+                            // Left drag handle
+                            let left_handle = ui.add_sized(
+                                handle_size,
+                                egui::Button::new("⋮⋮").sense(egui::Sense::drag()),
+                            );
+                            if left_handle.dragged() {
+                                drag_delta += left_handle.drag_delta();
+                            }
+
+                            egui::ScrollArea::horizontal()
+                                .id_salt("shortcut_pad_scroll")
+                                .max_width((max_pad_w - 76.0).max(160.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 5.0;
+                                        if ui
+                                            .add(egui::Button::new("Shift").selected(self.modifiers.shift).min_size(egui::vec2(44.0, btn_h)))
+                                            .clicked()
+                                        {
+                                            self.modifiers.shift = !self.modifiers.shift;
                                         }
-                                    }
-                                    if ui
-                                        .add_sized(btn_size, egui::Button::new("Mouse").selected(self.mouse_cursor_mode))
-                                        .clicked()
-                                    {
-                                        actions.toggle_mouse = true;
-                                    }
-                                    ui.separator();
-                                    if ui.add_sized(btn_size, egui::Button::new("Paste")).clicked() {
-                                        actions.paste = true;
-                                    }
-                                    if ui.add_sized(btn_size, egui::Button::new("Undo")).clicked() {
-                                        actions.undo = true;
-                                    }
-                                    if ui.add_sized(btn_size, egui::Button::new("Redo")).clicked() {
-                                        actions.redo = true;
-                                    }
-                                    if ui.add_sized(btn_size, egui::Button::new("KB")).clicked() {
-                                        actions.toggle_ime = true;
-                                    }
+                                        if ui
+                                            .add(egui::Button::new("Ctrl").selected(self.modifiers.ctrl).min_size(egui::vec2(42.0, btn_h)))
+                                            .clicked()
+                                        {
+                                            self.modifiers.ctrl = !self.modifiers.ctrl;
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("Alt").selected(self.modifiers.alt).min_size(egui::vec2(38.0, btn_h)))
+                                            .clicked()
+                                        {
+                                            self.modifiers.alt = !self.modifiers.alt;
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("손바닥").selected(self.modifiers.space_pan).min_size(egui::vec2(50.0, btn_h)))
+                                            .clicked()
+                                        {
+                                            self.modifiers.space_pan = !self.modifiers.space_pan;
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("그리기").selected(!self.long_press_enabled).min_size(egui::vec2(50.0, btn_h)))
+                                            .clicked()
+                                        {
+                                            self.long_press_enabled = !self.long_press_enabled;
+                                            if !self.long_press_enabled {
+                                                self.long_press = None;
+                                            }
+                                        }
+                                        if ui
+                                            .add(egui::Button::new("마우스").selected(self.mouse_cursor_mode).min_size(egui::vec2(50.0, btn_h)))
+                                            .clicked()
+                                        {
+                                            actions.toggle_mouse = true;
+                                        }
+                                        ui.separator();
+                                        if ui.add(egui::Button::new("붙여넣기").min_size(egui::vec2(58.0, btn_h))).clicked() {
+                                            actions.paste = true;
+                                        }
+                                        if ui.add(egui::Button::new("실행취소").min_size(egui::vec2(58.0, btn_h))).clicked() {
+                                            actions.undo = true;
+                                        }
+                                        if ui.add(egui::Button::new("다시실행").min_size(egui::vec2(58.0, btn_h))).clicked() {
+                                            actions.redo = true;
+                                        }
+                                        if ui.add(egui::Button::new("키보드").min_size(egui::vec2(50.0, btn_h))).clicked() {
+                                            actions.toggle_ime = true;
+                                        }
+                                    });
                                 });
-                            });
+
+                            // Right drag handle
+                            let right_handle = ui.add_sized(
+                                handle_size,
+                                egui::Button::new("⋮⋮").sense(egui::Sense::drag()),
+                            );
+                            if right_handle.dragged() {
+                                drag_delta += right_handle.drag_delta();
+                            }
+                        });
                     });
             });
+
+        if drag_delta.length_sq() > 0.01 {
+            pad_pos += drag_delta;
+            pad_pos.x = pad_pos.x.clamp(left_margin, (screen_w - right_inset - est_w).max(left_margin));
+            pad_pos.y = pad_pos.y.clamp(top_min, (screen_h - bottom_margin - pad_h).max(top_min));
+            self.shortcut_pad_pos = Some(pad_pos);
+            ctx.request_repaint();
+        }
         self.shortcut_pad_rect = Some(area_resp.response.rect);
         actions
     }
