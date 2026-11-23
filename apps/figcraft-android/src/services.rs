@@ -6,10 +6,105 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolbarButtonId {
+    Open,
+    Image,
+    Copy,
+    Cut,
+    Paste,
+    Duplicate,
+    Delete,
+    MultiSelect,
+    Undo,
+    Redo,
+    Group,
+    ZoomFit,
+    Mouse,
+    UiZoom,
+    Fullscreen,
+    Fonts,
+    UiFont,
+    Mcp,
+    CopyToken,
+    Pad,
+}
+
+impl ToolbarButtonId {
+    pub const ALL: &[Self] = &[
+        Self::Open,
+        Self::Image,
+        Self::Copy,
+        Self::Cut,
+        Self::Paste,
+        Self::Duplicate,
+        Self::Delete,
+        Self::MultiSelect,
+        Self::Undo,
+        Self::Redo,
+        Self::Group,
+        Self::ZoomFit,
+        Self::Mouse,
+        Self::UiZoom,
+        Self::Fullscreen,
+        Self::Fonts,
+        Self::UiFont,
+        Self::Mcp,
+        Self::CopyToken,
+        Self::Pad,
+    ];
+
+    pub fn default_bar() -> Vec<Self> {
+        vec![
+            Self::Open,
+            Self::Image,
+            Self::MultiSelect,
+            Self::Copy,
+            Self::Cut,
+            Self::Paste,
+            Self::Duplicate,
+            Self::Undo,
+            Self::Redo,
+            Self::Delete,
+            Self::Mouse,
+            Self::UiZoom,
+            Self::Fullscreen,
+            Self::Pad,
+        ]
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Open => "열기",
+            Self::Image => "이미지",
+            Self::Copy => "복사",
+            Self::Cut => "잘라내기",
+            Self::Paste => "붙여넣기",
+            Self::Duplicate => "복제",
+            Self::Delete => "삭제",
+            Self::MultiSelect => "다중선택",
+            Self::Undo => "실행취소",
+            Self::Redo => "다시실행",
+            Self::Group => "그룹",
+            Self::ZoomFit => "화면맞춤",
+            Self::Mouse => "마우스",
+            Self::UiZoom => "배율",
+            Self::Fullscreen => "전체화면",
+            Self::Fonts => "폰트",
+            Self::UiFont => "앱 폰트",
+            Self::Mcp => "MCP",
+            Self::CopyToken => "토큰 복사",
+            Self::Pad => "단축키",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AndroidShellPrefs {
     pub ui_zoom_factor: f32,
     pub immersive_mode: bool,
+    #[serde(default = "ToolbarButtonId::default_bar")]
+    pub toolbar_buttons: Vec<ToolbarButtonId>,
 }
 
 impl Default for AndroidShellPrefs {
@@ -17,6 +112,7 @@ impl Default for AndroidShellPrefs {
         Self {
             ui_zoom_factor: 1.25,
             immersive_mode: false,
+            toolbar_buttons: ToolbarButtonId::default_bar(),
         }
     }
 }
@@ -67,6 +163,10 @@ impl AndroidServices {
         let _ = platform::call_activity("set_immersive", if enable { "1" } else { "0" });
     }
 
+    pub fn set_light_system_bars(&self, is_light: bool) {
+        let _ = platform::call_activity("set_light_bars", if is_light { "1" } else { "0" });
+    }
+
     pub fn request_open_file(&self) -> Result<(), String> {
         match platform::call_activity("open_file", "") {
             BridgeReply::Ok(_) => Ok(()),
@@ -83,6 +183,13 @@ impl AndroidServices {
 
     pub fn request_pick_fonts_dir(&self) -> Result<(), String> {
         match platform::call_activity("pick_fonts_dir", "") {
+            BridgeReply::Ok(_) => Ok(()),
+            BridgeReply::Err(e) => Err(e),
+        }
+    }
+
+    pub fn request_pick_ui_font(&self) -> Result<(), String> {
+        match platform::call_activity("pick_ui_font", "") {
             BridgeReply::Ok(_) => Ok(()),
             BridgeReply::Err(e) => Err(e),
         }
