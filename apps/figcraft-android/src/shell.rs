@@ -5,14 +5,13 @@ use crate::platform;
 use crate::protocol::{ActivityEvent, StylusAction};
 use crate::services::{AndroidServices, AndroidShellPrefs, ToolbarButtonId};
 use crate::touch::TabletInputState;
+use figcraft_engine::branches::{needs_copy, recovery_copy, stamp};
 use figcraft_engine::Session;
 use figcraft_ui_egui::{FigApp, Services};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
-
-const ZOOM_PRESETS: [f32; 3] = [1.0, 1.25, 1.4];
 
 enum LoadedAsset {
     Document {
@@ -111,12 +110,20 @@ pub struct FigcraftAndroidShell {
     restore_focus_before_paste: bool,
     asset_tx: mpsc::Sender<LoadedAsset>,
     asset_rx: mpsc::Receiver<LoadedAsset>,
-    ui_font_installed: bool,
+    ui_font_frame_count: u32,
     pending_ui_font_path: Option<PathBuf>,
+    java_files_dir: Option<PathBuf>,
     last_light_bars: Option<bool>,
     android_system_dark: Option<bool>,
     show_toolbar_editor: bool,
+    show_mouse_settings: bool,
+    mouse_btn_press_start: Option<std::time::Instant>,
+    mouse_btn_long_fired: bool,
     pending_egui_events: Vec<egui::Event>,
+    last_wants_keyboard: bool,
+    ime_composing: bool,
+    last_recovery_stamps: Vec<(u64, Vec<u64>)>,
+    last_recovery_save: std::time::Instant,
 }
 
 impl FigcraftAndroidShell {
@@ -136,7 +143,6 @@ impl FigcraftAndroidShell {
     fn init_common(cc: &eframe::CreationContext<'_>, internal_dir: PathBuf) -> Self {
         let services = AndroidServices::new(internal_dir.clone());
         let prefs = services.load_prefs();
-        cc.egui_ctx.set_zoom_factor(prefs.ui_zoom_factor);
         if prefs.immersive_mode {
             services.set_immersive_mode(true);
         }
@@ -149,7 +155,22 @@ impl FigcraftAndroidShell {
         });
 
         let fig_prefs_path = internal_dir.join("figcraft_prefs.json");
-        let mut session = Session::new();
+        let recovery_files = services.read_recovery_snapshots();
+        let mut session = Session::empty();
+        let live_ctx = cc.egui_ctx.clone();
+        session.live.install(Box::new(figcraft_collab_net::NetLink::new(Arc::new(move || {
+            live_ctx.request_repaint();
+        }))));
+        let mut recovered_count = 0usize;
+        for bytes in &recovery_files {
+            let b64 = crate::services::encode_base64(bytes);
+            if session.execute("file.recover", &json!({ "data": b64 })).is_ok() {
+                recovered_count += 1;
+            }
+        }
+        if session.docs.is_empty() {
+            let _ = session.execute("file.new", &json!({}));
+        }
         if let Ok(raw) = std::fs::read_to_string(&fig_prefs_path) {
             if let Ok(loaded) = serde_json::from_str::<figcraft_engine::Prefs>(&raw) {
                 session.prefs = loaded;
@@ -166,6 +187,9 @@ impl FigcraftAndroidShell {
         };
 
         let mut fig = FigApp::new(session, Box::new(fig_services));
+        if recovered_count > 0 {
+            fig.note_recovered(recovered_count);
+        }
         fig.ui.home = false;
         fig.ui.title_bar = figcraft_ui_egui::TitleBar::Native;
 
@@ -189,7 +213,12 @@ impl FigcraftAndroidShell {
             fig,
             services,
             prefs,
-            tablet_input: TabletInputState::default(),
+            tablet_input: {
+                let mut ti = TabletInputState::default();
+                ti.mouse_cursor_scale = prefs.mouse_cursor_scale;
+                ti.mouse_grip_distance = prefs.mouse_grip_distance;
+                ti
+            },
             mcp_server,
             mcp_lan_mode: false,
             mcp_endpoint_label,
@@ -200,12 +229,20 @@ impl FigcraftAndroidShell {
             restore_focus_before_paste: false,
             asset_tx,
             asset_rx,
-            ui_font_installed: false,
+            ui_font_frame_count: 0,
             pending_ui_font_path: None,
+            java_files_dir: None,
             last_light_bars: None,
             android_system_dark: None,
             show_toolbar_editor: false,
+            show_mouse_settings: false,
+            mouse_btn_press_start: None,
+            mouse_btn_long_fired: false,
             pending_egui_events: Vec::new(),
+            last_wants_keyboard: false,
+            ime_composing: false,
+            last_recovery_stamps: Vec::new(),
+            last_recovery_save: std::time::Instant::now(),
         }
     }
 
@@ -216,54 +253,113 @@ impl FigcraftAndroidShell {
         if bytes.len() < 4096 {
             return false;
         }
+        let existing_families: Vec<egui::FontFamily> = ctx.fonts(|f| f.families());
+        let mut targets: Vec<egui::InsertFontFamily> = Vec::new();
+        for family in existing_families {
+            let skip = match &family {
+                egui::FontFamily::Name(name) => {
+                    let lower = name.to_lowercase();
+                    lower.contains("icon")
+                        || lower.contains("emoji")
+                        || lower.contains("symbol")
+                        || lower.contains("phosphor")
+                        || lower.contains("lucide")
+                        || lower.contains("material")
+                }
+                _ => false,
+            };
+            if !skip {
+                targets.push(egui::InsertFontFamily {
+                    family,
+                    priority: egui::FontPriority::Highest,
+                });
+            }
+        }
+        if targets.is_empty() {
+            targets.push(egui::InsertFontFamily {
+                family: egui::FontFamily::Proportional,
+                priority: egui::FontPriority::Highest,
+            });
+            targets.push(egui::InsertFontFamily {
+                family: egui::FontFamily::Monospace,
+                priority: egui::FontPriority::Highest,
+            });
+        }
         ctx.add_font(egui::FontInsert::new(
             &format!("android_ui_font_{label}"),
             egui::FontData::from_owned(bytes),
-            vec![
-                egui::InsertFontFamily {
-                    family: egui::FontFamily::Proportional,
-                    priority: egui::FontPriority::Highest,
-                },
-                egui::InsertFontFamily {
-                    family: egui::FontFamily::Monospace,
-                    priority: egui::FontPriority::Lowest,
-                },
-            ],
+            targets,
         ));
         ctx.request_repaint();
         true
     }
 
     fn ensure_default_korean_ui_font(&mut self, ctx: &egui::Context) {
-        if self.ui_font_installed {
+        self.ui_font_frame_count = self.ui_font_frame_count.saturating_add(1);
+        // Re-apply on frames 1, 10, 40, and 90 so FigApp startup or background font scan cannot wipe out our custom/bundled UI font
+        if !matches!(self.ui_font_frame_count, 1 | 10 | 40 | 90) {
             return;
         }
-        self.ui_font_installed = true;
+        let base_dir = self
+            .java_files_dir
+            .clone()
+            .unwrap_or_else(|| self.services.internal_dir.clone());
         let candidates = [
-            (self.services.internal_dir.join("ui_font.custom"), "custom"),
-            (self.services.internal_dir.join("bundled_ui_font.otf"), "pretendard"),
+            (base_dir.join("ui_font.custom"), "custom"),
+            (self.services.internal_dir.join("ui_font.custom"), "custom_alt"),
+            (base_dir.join("bundled_ui_font.otf"), "pretendard"),
+            (self.services.internal_dir.join("bundled_ui_font.otf"), "pretendard_alt"),
             (PathBuf::from("/system/fonts/NotoSansKR-Regular.otf"), "sys_notokr"),
             (PathBuf::from("/system/fonts/NotoSansCJK-Regular.ttc"), "sys_notocjk"),
             (PathBuf::from("/system/fonts/DroidSansFallback.ttf"), "sys_fallback"),
         ];
         for (path, label) in candidates {
             if self.install_ui_font_from_path(ctx, &path, label) {
-                log::info!("Installed Android UI font: {}", path.display());
+                log::info!("Installed Android UI font (frame {}): {}", self.ui_font_frame_count, path.display());
                 break;
             }
         }
     }
 
-    fn cycle_ui_zoom(&mut self, ctx: &egui::Context) {
-        let next = ZOOM_PRESETS
+    fn current_recovery_stamps(&self) -> Vec<(u64, Vec<u64>)> {
+        self.fig
+            .session
+            .docs
             .iter()
-            .copied()
-            .find(|&z| z > self.prefs.ui_zoom_factor + 0.01)
-            .unwrap_or(ZOOM_PRESETS[0]);
-        self.prefs.ui_zoom_factor = next;
-        ctx.set_zoom_factor(next);
-        self.services.save_prefs(&self.prefs);
-        self.status_banner = Some(format!("화면 배율: {}%", (next * 100.0).round() as i32));
+            .filter(|d| needs_copy(&self.fig.session, d))
+            .map(|d| (d.uid, stamp(&self.fig.session, d)))
+            .collect()
+    }
+
+    fn save_recovery_snapshots(&mut self, force: bool) {
+        let stamps = self.current_recovery_stamps();
+        if !force && stamps == self.last_recovery_stamps {
+            return;
+        }
+        self.last_recovery_stamps = stamps;
+        self.last_recovery_save = std::time::Instant::now();
+
+        let copies: Vec<_> = self
+            .fig
+            .session
+            .docs
+            .iter()
+            .filter(|d| needs_copy(&self.fig.session, d))
+            .map(|d| recovery_copy(&self.fig.session, d))
+            .collect();
+        let recovery_dir = self.services.recovery_dir.clone();
+
+        let _ = std::thread::Builder::new()
+            .name("figcraft-autosave".into())
+            .spawn(move || {
+                let encoded: Vec<Vec<u8>> = copies
+                    .into_iter()
+                    .filter_map(|(doc, versions, branches)| {
+                        figcraft_format::save_bytes_with_history(&doc, None, &versions, &branches).ok()
+                    })
+                    .collect();
+                AndroidServices::replace_recovery_snapshots(&recovery_dir, &encoded);
+            });
     }
 
     fn toggle_immersive(&mut self) {
@@ -385,23 +481,27 @@ impl FigcraftAndroidShell {
                 }
             }
             ToolbarButtonId::Mouse => {
-                if ui
-                    .add(
-                        egui::Button::new("마우스")
-                            .selected(self.tablet_input.mouse_cursor_mode)
-                            .min_size(egui::vec2(54.0, h)),
-                    )
-                    .clicked()
-                {
-                    self.toggle_mouse_mode();
+                let resp = ui.add(
+                    egui::Button::new("마우스")
+                        .selected(self.tablet_input.mouse_cursor_mode)
+                        .min_size(egui::vec2(54.0, h)),
+                );
+                if resp.is_pointer_button_down_on() {
+                    let started = *self.mouse_btn_press_start.get_or_insert_with(std::time::Instant::now);
+                    if !self.mouse_btn_long_fired && started.elapsed() >= std::time::Duration::from_millis(450) {
+                        self.mouse_btn_long_fired = true;
+                        self.show_mouse_settings = true;
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(40));
+                } else {
+                    if resp.clicked() && !self.mouse_btn_long_fired {
+                        self.toggle_mouse_mode();
+                    }
+                    self.mouse_btn_press_start = None;
+                    self.mouse_btn_long_fired = false;
                 }
             }
-            ToolbarButtonId::UiZoom => {
-                let zoom_label = format!("배율: {}%", (self.prefs.ui_zoom_factor * 100.0).round() as i32);
-                if ui.add(egui::Button::new(zoom_label).min_size(egui::vec2(76.0, h))).clicked() {
-                    self.cycle_ui_zoom(ctx);
-                }
-            }
+            ToolbarButtonId::UiZoom => {}
             ToolbarButtonId::Fullscreen => {
                 if ui
                     .add(
@@ -539,11 +639,70 @@ impl FigcraftAndroidShell {
 
     fn toggle_mouse_mode(&mut self) {
         self.tablet_input.mouse_cursor_mode = !self.tablet_input.mouse_cursor_mode;
+        if self.tablet_input.mouse_cursor_mode {
+            self.tablet_input.center_virtual_cursor();
+        }
         self.status_banner = Some(if self.tablet_input.mouse_cursor_mode {
-            "마우스 커서 켜짐 (스와이프=조준 · 탭=클릭 · 더블탭홀드=드래그)".into()
+            "마우스 켜짐 (우하단 원: 탭=클릭 · 길게=우클릭 · 드래그=이동 · 마우스버튼 길게=설정)".into()
         } else {
-            "마우스 커서 꺼짐 (직접 터치)".into()
+            "마우스 꺼짐".into()
         });
+    }
+
+    fn show_mouse_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_mouse_settings {
+            return;
+        }
+        let mut open = self.show_mouse_settings;
+        let mut changed = false;
+
+        egui::Window::new("마우스 커서 설정")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.label("마우스 커서 크기");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.prefs.mouse_cursor_scale, 0.6..=2.0)
+                            .suffix("x")
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
+                    self.tablet_input.mouse_cursor_scale = self.prefs.mouse_cursor_scale;
+                    changed = true;
+                }
+                ui.add_space(8.0);
+                ui.label("커서 ↔ 우하단 조작 원 간격");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.prefs.mouse_grip_distance, 24.0..=120.0)
+                            .suffix(" pt")
+                            .fixed_decimals(0),
+                    )
+                    .changed()
+                {
+                    self.tablet_input.mouse_grip_distance = self.prefs.mouse_grip_distance;
+                    changed = true;
+                }
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("기본값 복원").clicked() {
+                        self.prefs.mouse_cursor_scale = 1.0;
+                        self.prefs.mouse_grip_distance = 52.0;
+                        self.tablet_input.mouse_cursor_scale = 1.0;
+                        self.tablet_input.mouse_grip_distance = 52.0;
+                        changed = true;
+                    }
+                });
+            });
+
+        if changed {
+            self.services.save_prefs(&self.prefs);
+        }
+        self.show_mouse_settings = open;
     }
 
     fn toggle_mcp_lan(&mut self) {
@@ -642,6 +801,35 @@ impl FigcraftAndroidShell {
                 ActivityEvent::ImeChanged { visible, height } => {
                     self.tablet_input.ime_height_px = if visible { height } else { 0.0 };
                 }
+                ActivityEvent::ImeState(enabled) => {
+                    if enabled {
+                        self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Enabled));
+                    } else {
+                        self.ime_composing = false;
+                        self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Disabled));
+                    }
+                }
+                ActivityEvent::ImePreedit(text) => {
+                    self.ime_composing = !text.is_empty();
+                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit(text)));
+                }
+                ActivityEvent::ImeCommit(text) => {
+                    if self.ime_composing {
+                        self.ime_composing = false;
+                        self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(text)));
+                    } else {
+                        self.pending_egui_events.push(egui::Event::Text(text));
+                    }
+                }
+                ActivityEvent::ImeKey(key_name) => {
+                    match key_name.as_str() {
+                        "backspace" => self.queue_key_shortcut(egui::Key::Backspace, false, false),
+                        "enter" => self.queue_key_shortcut(egui::Key::Enter, false, false),
+                        "tab" => self.queue_key_shortcut(egui::Key::Tab, false, false),
+                        "escape" => self.queue_key_shortcut(egui::Key::Escape, false, false),
+                        _ => {}
+                    }
+                }
                 ActivityEvent::StylusSample {
                     action,
                     x,
@@ -694,8 +882,15 @@ impl FigcraftAndroidShell {
                     self.pending_ui_font_path = Some(PathBuf::from(path));
                     self.status_banner = Some(format!("UI Font: {display_name}"));
                 }
+                ActivityEvent::FilesDir(dir) => {
+                    self.java_files_dir = Some(PathBuf::from(dir));
+                    self.ui_font_frame_count = 0;
+                }
                 ActivityEvent::SystemTheme { dark } => {
                     self.android_system_dark = Some(dark);
+                }
+                ActivityEvent::AppPaused => {
+                    self.save_recovery_snapshots(false);
                 }
                 ActivityEvent::McpServiceStopped => {
                     self.mcp_server = None;
@@ -834,6 +1029,13 @@ impl FigcraftAndroidShell {
 impl eframe::App for FigcraftAndroidShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         figcraft_ui_egui::windows::guard(&mut self.fig, ctx, |fig| fig.background_tick(ctx));
+        if self.last_recovery_save.elapsed() >= std::time::Duration::from_secs(30) {
+            self.save_recovery_snapshots(false);
+        }
+    }
+
+    fn on_exit(&mut self) {
+        self.save_recovery_snapshots(true);
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -868,7 +1070,12 @@ impl eframe::App for FigcraftAndroidShell {
         self.tablet_input.set_pixels_per_point(ppp);
         self.tablet_input.screen_rect = ctx.input(|i| i.viewport_rect());
 
-        if !self.restore_focus_before_paste && ctx.egui_wants_keyboard_input() {
+        let wants_kb = ctx.egui_wants_keyboard_input();
+        if wants_kb != self.last_wants_keyboard {
+            self.last_wants_keyboard = wants_kb;
+            self.services.set_soft_keyboard(wants_kb);
+        }
+        if !self.restore_focus_before_paste && wants_kb {
             if let Some(focused) = ctx.memory(|m| m.focused()) {
                 self.last_focused_id = Some(focused);
             }
@@ -889,14 +1096,14 @@ impl eframe::App for FigcraftAndroidShell {
         let bottom_inset = self.tablet_input.safe_insets_px[2] / ppp;
         let left_inset = self.tablet_input.safe_insets_px[3] / ppp;
 
-        let top_btn_h = 34.0;
+        let top_btn_h = 44.0;
         let top_resp = egui::Panel::top("figcraft_android_topbar").show(ui, |ui| {
-            ui.add_space(top_inset);
+            ui.add_space(top_inset + 3.0);
             egui::ScrollArea::horizontal()
                 .id_salt("topbar_scroll")
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.spacing_mut().item_spacing.x = 7.0;
                         ui.add_space(left_inset);
                         let buttons = self.prefs.toolbar_buttons.clone();
                         for btn_id in buttons {
@@ -906,7 +1113,7 @@ impl eframe::App for FigcraftAndroidShell {
                             .add(
                                 egui::Button::new("+")
                                     .selected(self.show_toolbar_editor)
-                                    .min_size(egui::vec2(36.0, top_btn_h)),
+                                    .min_size(egui::vec2(42.0, top_btn_h)),
                             )
                             .clicked()
                         {
@@ -917,6 +1124,7 @@ impl eframe::App for FigcraftAndroidShell {
                         }
                         ui.add_space(right_inset);
                     });
+                    ui.add_space(6.0);
                 });
         });
         self.tablet_input.top_bar_bottom_pt = top_resp.response.rect.bottom();
@@ -943,12 +1151,7 @@ impl eframe::App for FigcraftAndroidShell {
             let _ = self.install_ui_font_from_path(&ctx, &font_path, "picked");
         }
 
-        // Enforce Android one-touch UI Scale AFTER FigApp::ui() so FigApp prefs do not reset it to 100%
-        if (self.prefs.ui_zoom_factor - 1.0).abs() > 0.01
-            && (ctx.zoom_factor() - self.prefs.ui_zoom_factor).abs() > 0.01
-        {
-            ctx.set_zoom_factor(self.prefs.ui_zoom_factor);
-        }
+
 
         // Floating tablet Shortcut Pad + Left-Top Offset Mouse Cursor overlay
         let pad_actions = self.tablet_input.show_shortcut_pad_ui(&ctx);
@@ -970,6 +1173,7 @@ impl eframe::App for FigcraftAndroidShell {
         }
 
         self.show_toolbar_editor_window(&ctx);
+        self.show_mouse_settings_window(&ctx);
         self.tablet_input.paint_virtual_cursor(&ctx);
 
         if self.tablet_input.needs_repaint()
