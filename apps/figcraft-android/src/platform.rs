@@ -10,35 +10,41 @@ mod imp {
     use android_activity::AndroidApp;
     use jni::objects::{GlobalRef, JObject, JString, JValue};
     use jni::JavaVM;
-    use std::sync::OnceLock;
+    use std::sync::RwLock;
 
     struct AndroidBridge {
         vm: JavaVM,
         activity: GlobalRef,
     }
 
-    static BRIDGE: OnceLock<AndroidBridge> = OnceLock::new();
+    static BRIDGE: RwLock<Option<AndroidBridge>> = RwLock::new(None);
 
     pub fn init(app: &AndroidApp) -> Result<(), String> {
         let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) }
             .map_err(|e| format!("JavaVM::from_raw failed: {e}"))?;
-        let env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("attach_current_thread failed: {e}"))?;
-        let activity_obj = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
-        let global_ref = env
-            .new_global_ref(activity_obj)
-            .map_err(|e| format!("new_global_ref failed: {e}"))?;
+        let global_ref = {
+            let env = vm
+                .attach_current_thread()
+                .map_err(|e| format!("attach_current_thread failed: {e}"))?;
+            let activity_obj = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+            env.new_global_ref(activity_obj)
+                .map_err(|e| format!("new_global_ref failed: {e}"))?
+        };
 
-        let _ = BRIDGE.set(AndroidBridge {
-            vm,
-            activity: global_ref,
-        });
+        if let Ok(mut guard) = BRIDGE.write() {
+            *guard = Some(AndroidBridge {
+                vm,
+                activity: global_ref,
+            });
+        }
         Ok(())
     }
 
     pub fn call(cmd: &str, arg: &str) -> BridgeReply {
-        let Some(bridge) = BRIDGE.get() else {
+        let Ok(guard) = BRIDGE.read() else {
+            return BridgeReply::Err("bridge lock poisoned".into());
+        };
+        let Some(bridge) = guard.as_ref() else {
             return BridgeReply::Err("bridge not initialized".into());
         };
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
