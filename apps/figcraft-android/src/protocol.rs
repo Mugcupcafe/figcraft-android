@@ -27,6 +27,7 @@ impl BridgeReply {
 pub enum ActivityEvent {
     FileOpened { path: String, display_name: String },
     ImagePicked { path: String, display_name: String, mime: String },
+    DropImage { path: String, display_name: String, mime: String },
     ClipboardText(String),
     ClipboardImage { path: String, mime: String },
     SaveAsPicked { uri: String, display_name: String },
@@ -89,6 +90,11 @@ impl ActivityEvent {
             "image_picked" => Some(Self::ImagePicked {
                 path: parts.next()?.to_owned(),
                 display_name: parts.next().unwrap_or("image.png").to_owned(),
+                mime: parts.next().unwrap_or("image/png").to_owned(),
+            }),
+            "drop_image" => Some(Self::DropImage {
+                path: parts.next()?.to_owned(),
+                display_name: parts.next().unwrap_or("drop.png").to_owned(),
                 mime: parts.next().unwrap_or("image/png").to_owned(),
             }),
             "clipboard_image" => Some(Self::ClipboardImage {
@@ -169,6 +175,14 @@ mod tests {
             Some(ActivityEvent::ClipboardImage {
                 path: "/tmp/c.img".into(),
                 mime: "image/webp".into(),
+            })
+        );
+        assert_eq!(
+            ActivityEvent::parse(&format!("drop_image{SEP}/tmp/d.jpg{SEP}d.jpg{SEP}image/jpeg")),
+            Some(ActivityEvent::DropImage {
+                path: "/tmp/d.jpg".into(),
+                display_name: "d.jpg".into(),
+                mime: "image/jpeg".into(),
             })
         );
     }
