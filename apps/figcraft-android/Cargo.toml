@@ -26,10 +26,13 @@ serde_json = "1"
 log = "0.4"
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.6", features = ["game-activity"] }
+android-activity = { version = "0.6.1", features = ["game-activity"] }
 android_logger = "0.15"
 jni = "0.21"
 winit = { version = "0.30", features = ["android-game-activity"] }
 
-[lints]
-workspace = true
+# Note: Do NOT inherit workspace `unsafe_code = "forbid"` here, because
+# Android cdylib requires `#[unsafe(no_mangle)] fn android_main` and JNI FFI in `platform.rs`.
+[lints.rust]
+unsafe_code = "allow"
+
