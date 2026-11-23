@@ -44,34 +44,44 @@ mod imp {
         let Ok(mut env) = bridge.vm.attach_current_thread() else {
             return BridgeReply::Err("failed to attach JNI thread".into());
         };
-        let Ok(j_cmd) = env.new_string(cmd) else {
-            return BridgeReply::Err("failed to allocate jstring cmd".into());
-        };
-        let Ok(j_arg) = env.new_string(arg) else {
-            return BridgeReply::Err("failed to allocate jstring arg".into());
-        };
 
-        let result = env.call_method(
-            bridge.activity.as_obj(),
-            "figcraftCall",
-            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-            &[JValue::Object(&j_cmd), JValue::Object(&j_arg)],
-        );
+        let frame_res: Result<BridgeReply, jni::errors::Error> =
+            env.with_local_frame(16, |env| {
+                let j_cmd = env.new_string(cmd)?;
+                let j_arg = env.new_string(arg)?;
 
-        match result {
-            Ok(val) => match val.l() {
-                Ok(obj) => {
-                    let jstr: JString = obj.into();
-                    match env.get_string(&jstr) {
-                        Ok(s) => BridgeReply::parse(&s.to_string_lossy()),
-                        Err(e) => BridgeReply::Err(format!("get_string failed: {e}")),
+                let result = env.call_method(
+                    bridge.activity.as_obj(),
+                    "figcraftCall",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&j_cmd), JValue::Object(&j_arg)],
+                );
+
+                let reply = match result {
+                    Ok(val) => match val.l() {
+                        Ok(obj) if !obj.is_null() => {
+                            let jstr: JString = obj.into();
+                            match env.get_string(&jstr) {
+                                Ok(s) => BridgeReply::parse(&s.to_string_lossy()),
+                                Err(e) => BridgeReply::Err(format!("get_string failed: {e}")),
+                            }
+                        }
+                        Ok(_) => BridgeReply::Ok(None),
+                        Err(e) => BridgeReply::Err(format!("invalid return object: {e}")),
+                    },
+                    Err(e) => {
+                        let _ = env.exception_clear();
+                        BridgeReply::Err(format!("JNI call_method failed: {e}"))
                     }
-                }
-                Err(e) => BridgeReply::Err(format!("invalid return object: {e}")),
-            },
+                };
+                Ok(reply)
+            });
+
+        match frame_res {
+            Ok(reply) => reply,
             Err(e) => {
                 let _ = env.exception_clear();
-                BridgeReply::Err(format!("JNI call_method failed: {e}"))
+                BridgeReply::Err(format!("JNI local frame failed: {e}"))
             }
         }
     }
