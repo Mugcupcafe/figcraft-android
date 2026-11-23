@@ -1091,7 +1091,6 @@ impl FigcraftAndroidShell {
             }),
         }
     }
-}
 
     fn upload_active_canvas_to_drive(&mut self) {
         let Some(dir) = self.java_files_dir.clone() else { return; };
@@ -1105,8 +1104,8 @@ impl FigcraftAndroidShell {
             .collect();
         let file_name = if safe_name.ends_with(".figcraft") { safe_name } else { format!("{safe_name}.figcraft") };
         let local_fig = cache_dir.join(&file_name);
-        let history = doc_state.history_snapshot();
-        if let Ok(bytes) = figcraft_format::save_bytes_with_history(&doc_state.doc, &history) {
+        let (doc, versions, branches) = recovery_copy(&self.fig.session, doc_state);
+        if let Ok(bytes) = figcraft_format::save_bytes_with_history(&doc, None, &versions, &branches) {
             if std::fs::write(&local_fig, bytes).is_ok() {
                 self.services.drive_upload_canvas(&file_name, &local_fig.to_string_lossy(), "");
             }
@@ -1135,12 +1134,12 @@ impl FigcraftAndroidShell {
         let _ = title;
     }
 
-    fn show_home_drive_strip(&mut self, ctx: &egui::Context) {
+    fn show_home_drive_strip(&mut self, ui: &mut egui::Ui) {
         let mut open_req: Option<(String, String)> = None;
         let mut open_page = false;
-        egui::TopBottomPanel::bottom("android_home_drive_recents")
+        egui::Panel::bottom("android_home_drive_recents")
             .resizable(false)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Google Drive 최근 캔버스").strong().size(13.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1285,6 +1284,8 @@ impl FigcraftAndroidShell {
             self.fig.ui.home = false;
         }
     }
+
+}
 
 impl eframe::App for FigcraftAndroidShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1444,7 +1445,7 @@ impl eframe::App for FigcraftAndroidShell {
         self.show_mouse_settings_window(&ctx);
         self.show_drive_window(&ctx);
         if self.fig.ui.home && !self.drive_items.is_empty() {
-            self.show_home_drive_strip(&ctx);
+            self.show_home_drive_strip(ui);
         }
         self.tablet_input.paint_virtual_cursor(&ctx);
 
