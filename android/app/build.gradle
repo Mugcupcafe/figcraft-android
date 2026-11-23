@@ -11,15 +11,11 @@ android {
         minSdk 29
         targetSdk 35
         versionCode 181
-        versionName "0.18.1-android-v6-hotfix6"
+        versionName "0.18.1-android-v7-hotfix1"
 
         ndk {
             abiFilters "arm64-v8a"
         }
-    }
-
-    buildFeatures {
-        prefab true
     }
 
     buildTypes {
@@ -47,6 +43,6 @@ dependencies {
     implementation platform('org.jetbrains.kotlin:kotlin-bom:1.8.22')
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.core:core:1.15.0'
-    // Matched to android-activity 0.6 bundled GameActivity C++ glue
-    implementation 'androidx.games:games-activity:2.0.2'
+    // Matched to android-activity 0.6.1 bundled GameActivity 4.4.0 glue
+    implementation 'androidx.games:games-activity:4.4.0'
 }
