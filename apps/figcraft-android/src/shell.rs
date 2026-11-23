@@ -209,16 +209,15 @@ impl FigcraftAndroidShell {
             }
         };
 
+        let mut tablet_input = TabletInputState::default();
+        tablet_input.mouse_cursor_scale = prefs.mouse_cursor_scale;
+        tablet_input.mouse_grip_distance = prefs.mouse_grip_distance;
+
         Self {
             fig,
             services,
             prefs,
-            tablet_input: {
-                let mut ti = TabletInputState::default();
-                ti.mouse_cursor_scale = prefs.mouse_cursor_scale;
-                ti.mouse_grip_distance = prefs.mouse_grip_distance;
-                ti
-            },
+            tablet_input,
             mcp_server,
             mcp_lan_mode: false,
             mcp_endpoint_label,
@@ -802,16 +801,16 @@ impl FigcraftAndroidShell {
                     self.tablet_input.ime_height_px = if visible { height } else { 0.0 };
                 }
                 ActivityEvent::ImeState(enabled) => {
-                    if enabled {
-                        self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Enabled));
-                    } else {
+                    if !enabled {
                         self.ime_composing = false;
-                        self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Disabled));
                     }
                 }
                 ActivityEvent::ImePreedit(text) => {
                     self.ime_composing = !text.is_empty();
-                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit(text)));
+                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                        text,
+                        active_range_chars: None,
+                    }));
                 }
                 ActivityEvent::ImeCommit(text) => {
                     if self.ime_composing {
