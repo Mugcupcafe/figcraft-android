@@ -13,6 +13,8 @@ const MOUSE_TAP_MAX_DURATION: Duration = Duration::from_millis(260);
 const MOUSE_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(340);
 const MOUSE_OFFSET_X: f32 = -36.0;
 const MOUSE_OFFSET_Y: f32 = -44.0;
+const PINCH_ZOOM_DEADZONE_PT: f32 = 10.0;
+const PINCH_ZOOM_STEP_THRESHOLD: f32 = 0.015;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TabletModifiers {
@@ -55,9 +57,11 @@ struct LongPressCandidate {
 struct MouseTouchTrack {
     touch_id: egui::TouchId,
     down_finger_pos: egui::Pos2,
+    last_finger_pos: egui::Pos2,
     down_at: Instant,
     moved_far: bool,
     is_dragging: bool,
+    right_clicked: bool,
 }
 
 pub struct TabletInputState {
@@ -67,6 +71,8 @@ pub struct TabletInputState {
     pub mouse_cursor_mode: bool,
     pub multi_select_mode: bool,
     pub virtual_cursor_pos: egui::Pos2,
+    pub mouse_cursor_scale: f32,
+    pub mouse_grip_distance: f32,
     pub stylus_active: bool,
     pub last_stylus_time: Option<Instant>,
     pub last_stylus_pos_pt: egui::Pos2,
@@ -84,6 +90,8 @@ pub struct TabletInputState {
 
     active_touches: BTreeMap<egui::TouchId, egui::Pos2>,
     was_multi_touch: bool,
+    pinch_start_dist: Option<f32>,
+    pinch_zoom_unlocked: bool,
     last_pinch_dist: Option<f32>,
     last_pinch_center: Option<egui::Pos2>,
     hand_pan_last_pos: Option<egui::Pos2>,
@@ -94,6 +102,7 @@ pub struct TabletInputState {
     shortcut_pad_id: egui::Id,
     mouse_track: Option<MouseTouchTrack>,
     last_mouse_tap: Option<(Instant, egui::Pos2)>,
+    chrome_touch_id: Option<egui::TouchId>,
 }
 
 impl Default for TabletInputState {
@@ -105,6 +114,8 @@ impl Default for TabletInputState {
             mouse_cursor_mode: false,
             multi_select_mode: false,
             virtual_cursor_pos: egui::pos2(300.0, 300.0),
+            mouse_cursor_scale: 1.0,
+            mouse_grip_distance: 52.0,
             stylus_active: false,
             last_stylus_time: None,
             last_stylus_pos_pt: egui::Pos2::ZERO,
@@ -121,6 +132,8 @@ impl Default for TabletInputState {
             screen_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0)),
             active_touches: BTreeMap::new(),
             was_multi_touch: false,
+            pinch_start_dist: None,
+            pinch_zoom_unlocked: false,
             last_pinch_dist: None,
             last_pinch_center: None,
             hand_pan_last_pos: None,
@@ -131,6 +144,7 @@ impl Default for TabletInputState {
             shortcut_pad_id: egui::Id::unique("figcraft_tablet_shortcut_pad"),
             mouse_track: None,
             last_mouse_tap: None,
+            chrome_touch_id: None,
         }
     }
 }
@@ -153,6 +167,29 @@ impl TabletInputState {
 
     pub fn needs_repaint(&self) -> bool {
         self.long_press.as_ref().is_some_and(|lp| !lp.triggered)
+            || self.mouse_track.is_some_and(|tr| !tr.moved_far && !tr.is_dragging && !tr.right_clicked)
+    }
+
+    pub fn center_virtual_cursor(&mut self) {
+        self.virtual_cursor_pos = self.screen_rect.center();
+    }
+
+    pub fn mouse_grip_radius(&self) -> f32 {
+        (22.0 * self.mouse_cursor_scale.clamp(0.7, 1.6)).clamp(18.0, 36.0)
+    }
+
+    pub fn mouse_grip_center(&self) -> egui::Pos2 {
+        let d = self.mouse_grip_distance.clamp(24.0, 120.0);
+        let offset = d * 0.7071;
+        let r = self.mouse_grip_radius();
+        let min_x = self.screen_rect.left() + r;
+        let max_x = (self.screen_rect.right() - r).max(min_x);
+        let min_y = self.screen_rect.top() + r;
+        let max_y = (self.screen_rect.bottom() - r).max(min_y);
+        egui::pos2(
+            (self.virtual_cursor_pos.x + offset).clamp(min_x, max_x),
+            (self.virtual_cursor_pos.y + offset).clamp(min_y, max_y),
+        )
     }
 
     pub fn on_stylus_event(
@@ -409,18 +446,17 @@ impl TabletInputState {
             if let (Some(&p1), Some(&p2)) = (iter.next(), iter.next()) {
                 let dist = p1.distance(p2).max(1.0);
                 let center = egui::pos2((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
-                // Keep hover_pos anchored at pinch midpoint so FigCraft canvas accepts Zoom & Wheel
                 synthetic_events.push(egui::Event::PointerMoved(center));
 
-                if let (Some(prev_dist), Some(prev_center)) =
-                    (self.last_pinch_dist, self.last_pinch_center)
-                {
-                    let zoom_ratio = (dist / prev_dist).clamp(0.5, 2.0);
-                    if (zoom_ratio - 1.0).abs() > 0.002 {
-                        synthetic_events.push(egui::Event::Zoom(zoom_ratio));
-                    }
+                let start_dist = *self.pinch_start_dist.get_or_insert(dist);
+                if !self.pinch_zoom_unlocked && (dist - start_dist).abs() >= PINCH_ZOOM_DEADZONE_PT {
+                    self.pinch_zoom_unlocked = true;
+                    self.last_pinch_dist = Some(dist);
+                }
+
+                if let Some(prev_center) = self.last_pinch_center {
                     let pan_delta = center - prev_center;
-                    if pan_delta.length_sq() > 0.05 {
+                    if pan_delta.length_sq() > 0.15 {
                         synthetic_events.push(egui::Event::MouseWheel {
                             unit: egui::MouseWheelUnit::Point,
                             delta: pan_delta,
@@ -430,10 +466,23 @@ impl TabletInputState {
                         });
                     }
                 }
-                self.last_pinch_dist = Some(dist);
+
+                if self.pinch_zoom_unlocked {
+                    if let Some(prev_dist) = self.last_pinch_dist {
+                        let zoom_ratio = (dist / prev_dist).clamp(0.5, 2.0);
+                        if (zoom_ratio - 1.0).abs() >= PINCH_ZOOM_STEP_THRESHOLD {
+                            synthetic_events.push(egui::Event::Zoom(zoom_ratio));
+                            self.last_pinch_dist = Some(dist);
+                        }
+                    } else {
+                        self.last_pinch_dist = Some(dist);
+                    }
+                }
                 self.last_pinch_center = Some(center);
             }
         } else {
+            self.pinch_start_dist = None;
+            self.pinch_zoom_unlocked = false;
             self.last_pinch_dist = None;
             self.last_pinch_center = None;
             if self.active_touches.is_empty() {
@@ -479,46 +528,46 @@ impl TabletInputState {
         raw_input.events.extend(synthetic_events);
     }
 
-    /// Handles Left-Top Offset Mouse Cursor Mode:
-    /// - Single-finger drag: Hover move (cursor follows left-top of finger, no click)
-    /// - Single-finger tap: Left-click at cursor position
-    /// - Double-tap & hold drag: Left-button drag at cursor position
-    /// - Two-finger pinch/pan: Zoom & pan canvas
+    /// Handles Grip-Circle Mouse Cursor Mode:
+    /// - Only touches starting inside the bottom-right semi-transparent grip circle control the cursor
+    /// - Tap grip: Left-click at cursor tip
+    /// - Long-press grip (>= 500ms): Right-click at cursor tip
+    /// - Drag grip: Move cursor + grip smoothly (hover aim)
+    /// - Double-tap & hold grip: Left-button drag at cursor tip
+    /// - Touches outside the grip circle (top bar, canvas, 2-finger pan/zoom) pass through normally and keep cursor stationary
     fn process_mouse_cursor_mode(
         &mut self,
         raw_input: &mut egui::RawInput,
         active_modifiers: egui::Modifiers,
         synthetic_events: &mut Vec<egui::Event>,
     ) -> bool {
-        let mut saw_touch = false;
-        let mut direct_chrome_touch = false;
+        let grip_center = self.mouse_grip_center();
+        let grip_hit_r = self.mouse_grip_radius() + 10.0;
+        let mut grip_handled_this_frame = self.mouse_track.is_some();
 
         for event in &raw_input.events {
             if let egui::Event::Touch { id, phase, pos, .. } = event {
-                saw_touch = true;
-                if matches!(phase, egui::TouchPhase::Start)
-                    && self.active_touches.is_empty()
-                    && self.is_in_shell_chrome(*pos)
-                {
-                    direct_chrome_touch = true;
-                }
                 match phase {
                     egui::TouchPhase::Start => {
-                        self.active_touches.insert(*id, *pos);
-                        if !direct_chrome_touch && self.active_touches.len() == 1 {
-                            let cursor = self.finger_to_cursor_pos(*pos);
-                            self.virtual_cursor_pos = cursor;
+                        if self.mouse_track.is_none()
+                            && self.active_touches.is_empty()
+                            && pos.distance(grip_center) <= grip_hit_r
+                        {
+                            grip_handled_this_frame = true;
                             let is_double_tap = self.last_mouse_tap.is_some_and(|(t, prev_f)| {
                                 t.elapsed() <= MOUSE_DOUBLE_TAP_WINDOW
-                                    && prev_f.distance(*pos) <= 32.0
+                                    && prev_f.distance(*pos) <= grip_hit_r + 16.0
                             });
                             self.mouse_track = Some(MouseTouchTrack {
                                 touch_id: *id,
                                 down_finger_pos: *pos,
+                                last_finger_pos: *pos,
                                 down_at: Instant::now(),
                                 moved_far: false,
                                 is_dragging: is_double_tap,
+                                right_clicked: false,
                             });
+                            let cursor = self.virtual_cursor_pos;
                             synthetic_events.push(egui::Event::PointerMoved(cursor));
                             if is_double_tap {
                                 self.last_mouse_tap = None;
@@ -529,8 +578,8 @@ impl TabletInputState {
                                     modifiers: active_modifiers,
                                 });
                             }
-                        } else if self.active_touches.len() >= 2 {
-                            // Cancel any drag before pinch/pan
+                        } else if self.mouse_track.is_some() {
+                            // Second finger touched down while holding grip: cancel grip drag & hand off cleanly
                             if let Some(tr) = self.mouse_track.take() {
                                 if tr.is_dragging {
                                     synthetic_events.push(egui::Event::PointerButton {
@@ -541,27 +590,34 @@ impl TabletInputState {
                                     });
                                 }
                             }
+                            grip_handled_this_frame = false;
                         }
                     }
                     egui::TouchPhase::Move => {
-                        self.active_touches.insert(*id, *pos);
-                        if self.active_touches.len() == 1 {
-                            if let Some(tr) = &mut self.mouse_track {
-                                if tr.touch_id == *id {
-                                    if tr.down_finger_pos.distance(*pos) > MOUSE_TAP_SLOP_PT {
-                                        tr.moved_far = true;
-                                    }
-                                    let cursor = self.finger_to_cursor_pos(*pos);
-                                    self.virtual_cursor_pos = cursor;
-                                    synthetic_events.push(egui::Event::PointerMoved(cursor));
+                        if let Some(tr) = &mut self.mouse_track {
+                            if tr.touch_id == *id {
+                                grip_handled_this_frame = true;
+                                if tr.down_finger_pos.distance(*pos) > MOUSE_TAP_SLOP_PT {
+                                    tr.moved_far = true;
+                                }
+                                if !tr.right_clicked {
+                                    let delta = *pos - tr.last_finger_pos;
+                                    tr.last_finger_pos = *pos;
+                                    let max_x = self.screen_rect.right().max(100.0) - 1.0;
+                                    let max_y = self.screen_rect.bottom().max(100.0) - 1.0;
+                                    self.virtual_cursor_pos = egui::pos2(
+                                        (self.virtual_cursor_pos.x + delta.x).clamp(0.0, max_x),
+                                        (self.virtual_cursor_pos.y + delta.y).clamp(0.0, max_y),
+                                    );
+                                    synthetic_events.push(egui::Event::PointerMoved(self.virtual_cursor_pos));
                                 }
                             }
                         }
                     }
                     egui::TouchPhase::End | egui::TouchPhase::Cancel => {
-                        self.active_touches.remove(id);
                         if let Some(tr) = self.mouse_track {
                             if tr.touch_id == *id {
+                                grip_handled_this_frame = true;
                                 self.mouse_track = None;
                                 let cursor = self.virtual_cursor_pos;
                                 if tr.is_dragging {
@@ -571,7 +627,8 @@ impl TabletInputState {
                                         pressed: false,
                                         modifiers: active_modifiers,
                                     });
-                                } else if matches!(phase, egui::TouchPhase::End)
+                                } else if !tr.right_clicked
+                                    && matches!(phase, egui::TouchPhase::End)
                                     && !tr.moved_far
                                     && tr.down_at.elapsed() <= MOUSE_TAP_MAX_DURATION
                                 {
@@ -597,53 +654,37 @@ impl TabletInputState {
             }
         }
 
-        if direct_chrome_touch {
-            self.mouse_track = None;
-            return false;
-        }
-
-        if !saw_touch && self.mouse_track.is_none() && self.active_touches.is_empty() {
-            return false;
-        }
-
-        // Handle 2-finger pinch/pan cleanly in mouse mode too
-        if self.active_touches.len() >= 2 {
-            self.was_multi_touch = true;
-            let mut iter = self.active_touches.values();
-            if let (Some(&p1), Some(&p2)) = (iter.next(), iter.next()) {
-                let dist = p1.distance(p2).max(1.0);
-                let center = egui::pos2((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
-                synthetic_events.push(egui::Event::PointerMoved(center));
-                if let (Some(prev_dist), Some(prev_center)) =
-                    (self.last_pinch_dist, self.last_pinch_center)
-                {
-                    let zoom_ratio = (dist / prev_dist).clamp(0.5, 2.0);
-                    if (zoom_ratio - 1.0).abs() > 0.002 {
-                        synthetic_events.push(egui::Event::Zoom(zoom_ratio));
-                    }
-                    let pan_delta = center - prev_center;
-                    if pan_delta.length_sq() > 0.05 {
-                        synthetic_events.push(egui::Event::MouseWheel {
-                            unit: egui::MouseWheelUnit::Point,
-                            delta: pan_delta,
-                            phase: egui::TouchPhase::Move,
-                            source: egui::MouseWheelSource::Unknown,
-                            modifiers: active_modifiers,
-                        });
-                    }
-                }
-                self.last_pinch_dist = Some(dist);
-                self.last_pinch_center = Some(center);
-            }
-        } else {
-            self.last_pinch_dist = None;
-            self.last_pinch_center = None;
-            if self.active_touches.is_empty() {
-                self.was_multi_touch = false;
+        // Long-press on grip circle (>= 500ms without dragging) -> Right-click at cursor tip
+        if let Some(tr) = &mut self.mouse_track {
+            if !tr.moved_far
+                && !tr.is_dragging
+                && !tr.right_clicked
+                && tr.down_at.elapsed() >= Duration::from_millis(500)
+            {
+                tr.right_clicked = true;
+                let cursor = self.virtual_cursor_pos;
+                synthetic_events.push(egui::Event::PointerMoved(cursor));
+                synthetic_events.push(egui::Event::PointerButton {
+                    pos: cursor,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: active_modifiers,
+                });
+                synthetic_events.push(egui::Event::PointerButton {
+                    pos: cursor,
+                    button: egui::PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: active_modifiers,
+                });
             }
         }
 
-        // Strip raw finger touch/pointer events so only our offset cursor events reach egui
+        if !grip_handled_this_frame {
+            // Touch was NOT on the grip circle: let normal direct touch & 2-finger pan/zoom run while cursor stays still!
+            return false;
+        }
+
+        // Strip raw finger touch/pointer events ONLY when the grip circle owns this touch
         raw_input.events.retain(|ev| {
             !matches!(
                 ev,
@@ -658,7 +699,8 @@ impl TabletInputState {
         true
     }
 
-    /// Draws the glowing Left-Top Offset Mouse Cursor overlay on the foreground layer.
+    /// Draws a clean desktop-style mouse cursor arrow (two convex parts + closed crisp outline)
+    /// and the bottom-right semi-transparent black touch grip circle with white border.
     pub fn paint_virtual_cursor(&self, ctx: &egui::Context) {
         if !self.mouse_cursor_mode || self.is_palm_rejection_active() {
             return;
@@ -668,27 +710,60 @@ impl TabletInputState {
             egui::Id::unique("figcraft_virtual_mouse_cursor"),
         ));
         let p = self.virtual_cursor_pos;
+        let sc = self.mouse_cursor_scale.clamp(0.6, 2.0);
         let dragging = self.mouse_track.is_some_and(|t| t.is_dragging);
-        let accent = if dragging {
-            egui::Color32::from_rgb(251, 146, 60) // orange while dragging
-        } else {
-            egui::Color32::from_rgb(56, 189, 248) // cyan while aiming
-        };
+        let active_grip = self.mouse_track.is_some();
 
-        painter.circle_stroke(p, if dragging { 11.0 } else { 8.0 }, egui::Stroke::new(1.5, accent));
-        let arrow = vec![
-            p,
-            p + egui::vec2(0.0, 17.0),
-            p + egui::vec2(4.5, 13.0),
-            p + egui::vec2(8.0, 19.5),
-            p + egui::vec2(10.5, 18.0),
-            p + egui::vec2(7.0, 11.5),
-            p + egui::vec2(12.5, 11.5),
+        // 1. Bottom-right touch grip circle (semi-transparent black fill + crisp white border)
+        let grip_c = self.mouse_grip_center();
+        let grip_r = self.mouse_grip_radius();
+        let grip_fill = if dragging {
+            egui::Color32::from_rgba_unmultiplied(234, 88, 12, 165)
+        } else if active_grip {
+            egui::Color32::from_rgba_unmultiplied(15, 23, 42, 195)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(15, 15, 20, 140)
+        };
+        let grip_stroke_color = if dragging {
+            egui::Color32::from_rgb(253, 186, 116)
+        } else {
+            egui::Color32::WHITE
+        };
+        painter.circle(
+            grip_c,
+            grip_r,
+            grip_fill,
+            egui::Stroke::new(2.0, grip_stroke_color),
+        );
+        // Subtle center dot inside the grip circle
+        painter.circle_filled(grip_c, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 190));
+
+        // 2. Clean desktop mouse arrow decomposed into 2 convex shapes (no triangulation gaps!)
+        let v = |x: f32, y: f32| p + egui::vec2(x * sc, y * sc);
+
+        // Arrowhead (convex 4-gon: tip -> bottom-left -> notch -> right-wing)
+        let head = vec![v(0.0, 0.0), v(0.0, 18.0), v(5.0, 13.5), v(13.0, 13.0)];
+        // Shaft (convex 4-gon)
+        let shaft = vec![v(4.8, 13.2), v(8.2, 21.0), v(11.0, 19.8), v(7.6, 12.6)];
+
+        let fill = egui::Color32::WHITE;
+        let outline = egui::Color32::from_rgb(15, 23, 42);
+        painter.add(egui::Shape::convex_polygon(head, fill, egui::Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(shaft, fill, egui::Stroke::NONE));
+
+        // Crisp continuous outer contour around the entire arrow
+        let contour = vec![
+            v(0.0, 0.0),
+            v(0.0, 18.0),
+            v(4.8, 13.6),
+            v(8.2, 21.0),
+            v(11.0, 19.8),
+            v(7.6, 12.8),
+            v(13.0, 13.0),
         ];
-        painter.add(egui::Shape::convex_polygon(
-            arrow,
-            egui::Color32::WHITE,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(15, 23, 42)),
+        painter.add(egui::Shape::closed_line(
+            contour,
+            egui::Stroke::new((1.6 * sc).clamp(1.2, 2.6), outline),
         ));
     }
 
@@ -735,8 +810,9 @@ impl TabletInputState {
                     .corner_radius(egui::CornerRadius::same(14))
                     .inner_margin(egui::Margin::symmetric(6, 6))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.set_height(btn_h);
+                        ui.horizontal_centered(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(5.0, 0.0);
 
                             // Left drag handle
                             let left_handle = ui.add_sized(
@@ -750,35 +826,37 @@ impl TabletInputState {
                             egui::ScrollArea::horizontal()
                                 .id_salt("shortcut_pad_scroll")
                                 .max_width((max_pad_w - 76.0).max(160.0))
+                                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                                 .show(ui, |ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 5.0;
+                                    ui.set_height(btn_h);
+                                    ui.horizontal_centered(|ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(5.0, 0.0);
                                         if ui
-                                            .add(egui::Button::new("Shift").selected(self.modifiers.shift).min_size(egui::vec2(44.0, btn_h)))
+                                            .add_sized(egui::vec2(44.0, btn_h), egui::Button::new("Shift").selected(self.modifiers.shift))
                                             .clicked()
                                         {
                                             self.modifiers.shift = !self.modifiers.shift;
                                         }
                                         if ui
-                                            .add(egui::Button::new("Ctrl").selected(self.modifiers.ctrl).min_size(egui::vec2(42.0, btn_h)))
+                                            .add_sized(egui::vec2(42.0, btn_h), egui::Button::new("Ctrl").selected(self.modifiers.ctrl))
                                             .clicked()
                                         {
                                             self.modifiers.ctrl = !self.modifiers.ctrl;
                                         }
                                         if ui
-                                            .add(egui::Button::new("Alt").selected(self.modifiers.alt).min_size(egui::vec2(38.0, btn_h)))
+                                            .add_sized(egui::vec2(38.0, btn_h), egui::Button::new("Alt").selected(self.modifiers.alt))
                                             .clicked()
                                         {
                                             self.modifiers.alt = !self.modifiers.alt;
                                         }
                                         if ui
-                                            .add(egui::Button::new("손바닥").selected(self.modifiers.space_pan).min_size(egui::vec2(50.0, btn_h)))
+                                            .add_sized(egui::vec2(50.0, btn_h), egui::Button::new("손바닥").selected(self.modifiers.space_pan))
                                             .clicked()
                                         {
                                             self.modifiers.space_pan = !self.modifiers.space_pan;
                                         }
                                         if ui
-                                            .add(egui::Button::new("그리기").selected(!self.long_press_enabled).min_size(egui::vec2(50.0, btn_h)))
+                                            .add_sized(egui::vec2(50.0, btn_h), egui::Button::new("그리기").selected(!self.long_press_enabled))
                                             .clicked()
                                         {
                                             self.long_press_enabled = !self.long_press_enabled;
@@ -787,22 +865,22 @@ impl TabletInputState {
                                             }
                                         }
                                         if ui
-                                            .add(egui::Button::new("마우스").selected(self.mouse_cursor_mode).min_size(egui::vec2(50.0, btn_h)))
+                                            .add_sized(egui::vec2(50.0, btn_h), egui::Button::new("마우스").selected(self.mouse_cursor_mode))
                                             .clicked()
                                         {
                                             actions.toggle_mouse = true;
                                         }
                                         ui.separator();
-                                        if ui.add(egui::Button::new("붙여넣기").min_size(egui::vec2(58.0, btn_h))).clicked() {
+                                        if ui.add_sized(egui::vec2(58.0, btn_h), egui::Button::new("붙여넣기")).clicked() {
                                             actions.paste = true;
                                         }
-                                        if ui.add(egui::Button::new("실행취소").min_size(egui::vec2(58.0, btn_h))).clicked() {
+                                        if ui.add_sized(egui::vec2(58.0, btn_h), egui::Button::new("실행취소")).clicked() {
                                             actions.undo = true;
                                         }
-                                        if ui.add(egui::Button::new("다시실행").min_size(egui::vec2(58.0, btn_h))).clicked() {
+                                        if ui.add_sized(egui::vec2(58.0, btn_h), egui::Button::new("다시실행")).clicked() {
                                             actions.redo = true;
                                         }
-                                        if ui.add(egui::Button::new("키보드").min_size(egui::vec2(50.0, btn_h))).clicked() {
+                                        if ui.add_sized(egui::vec2(50.0, btn_h), egui::Button::new("키보드")).clicked() {
                                             actions.toggle_ime = true;
                                         }
                                     });
