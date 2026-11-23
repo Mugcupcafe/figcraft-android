@@ -74,6 +74,10 @@ public class FigCraftActivity extends GameActivity {
     private volatile boolean immersiveEnabled = false;
 
     static {
+        try {
+            System.loadLibrary("c++_shared");
+        } catch (UnsatisfiedLinkError ignored) {
+        }
         System.loadLibrary("figcraft_android");
     }
 
@@ -371,9 +375,15 @@ public class FigCraftActivity extends GameActivity {
                     return ip == null ? "ok" : ("ok" + SEP + ip);
                 }
                 case "start_mcp_service": {
-                    Intent svc = new Intent(this, McpForegroundService.class);
-                    svc.putExtra(McpForegroundService.EXTRA_ENDPOINT, arg);
-                    ContextCompat.startForegroundService(this, svc);
+                    runOnUiThread(() -> {
+                        try {
+                            Intent svc = new Intent(this, McpForegroundService.class);
+                            svc.putExtra(McpForegroundService.EXTRA_ENDPOINT, arg);
+                            ContextCompat.startForegroundService(this, svc);
+                        } catch (Exception ignored) {
+                            // Keep embedded HTTP server running without crashing if FGS is restricted
+                        }
+                    });
                     return "ok";
                 }
                 case "stop_mcp_service": {
