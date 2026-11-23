@@ -31,6 +31,7 @@ pub enum ActivityEvent {
     ClipboardImage { path: String, mime: String },
     SaveAsPicked { uri: String, display_name: String },
     FontsSynced { count: usize },
+    UiFontPicked { path: String, display_name: String },
     WindowInsets {
         top: f32,
         right: f32,
@@ -47,6 +48,7 @@ pub enum ActivityEvent {
         is_eraser: bool,
         action: StylusAction,
     },
+    SystemTheme { dark: bool },
     McpServiceStopped,
 }
 
@@ -88,6 +90,10 @@ impl ActivityEvent {
             "fonts_synced" => Some(Self::FontsSynced {
                 count: parts.next()?.parse().ok()?,
             }),
+            "ui_font_picked" => Some(Self::UiFontPicked {
+                path: parts.next()?.to_owned(),
+                display_name: parts.next().unwrap_or("custom.ttf").to_owned(),
+            }),
             "insets" => Some(Self::WindowInsets {
                 top: parts.next()?.parse().ok()?,
                 right: parts.next()?.parse().ok()?,
@@ -115,6 +121,9 @@ impl ActivityEvent {
                     is_eraser: parts.next()? == "1",
                 })
             }
+            "system_theme" => Some(Self::SystemTheme {
+                dark: parts.next()? == "dark",
+            }),
             "mcp_stopped" => Some(Self::McpServiceStopped),
             _ => None,
         }
