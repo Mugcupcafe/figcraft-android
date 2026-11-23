@@ -188,6 +188,7 @@ pub fn install_panic_hook(app: &android_activity::AndroidApp) {
     std::panic::set_hook(Box::new(move |info| {
         let msg = format!("PANIC: {info}\n");
         log::error!("{msg}");
-        let _ = fs::write(&log_path, msg);
+        let _ = fs::write(&log_path, &msg);
+        let _ = platform::call_activity("save_crash_log", &msg);
     }));
 }
