@@ -61,6 +61,7 @@ workflows:
 
       - name: Cross-compile libfigcraft_android.so & bundle libc++_shared.so
         script: |
+          set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
           SDK_DIR="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
           NDK="$SDK_DIR/ndk/${NDK_VERSION}"
@@ -88,11 +89,15 @@ workflows:
 
       - name: Assemble Android ARM64 Debug APK
         script: |
+          set -euo pipefail
+          test -s android/app/src/main/jniLibs/arm64-v8a/libfigcraft_android.so
+          test -s android/app/src/main/jniLibs/arm64-v8a/libc++_shared.so
           if ! command -v gradle >/dev/null 2>&1; then
             curl -sL https://services.gradle.org/distributions/gradle-8.10.2-bin.zip -o /tmp/gradle.zip
             unzip -q /tmp/gradle.zip -d /tmp/gradle
             export PATH="/tmp/gradle/gradle-8.10.2/bin:$PATH"
           fi
           gradle -p android :app:assembleDebug --stacktrace
+          unzip -l android/app/build/outputs/apk/debug/app-debug.apk | grep "lib/arm64-v8a/libfigcraft_android.so"
     artifacts:
       - android/app/build/outputs/apk/debug/*.apk
