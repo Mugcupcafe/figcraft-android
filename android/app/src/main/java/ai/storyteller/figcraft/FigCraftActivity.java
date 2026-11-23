@@ -60,6 +60,7 @@ public class FigCraftActivity extends GameActivity {
     private static final int REQ_POST_NOTIFICATIONS = 1003;
     private static final int REQ_PICK_FONTS_DIR = 1004;
     private static final int REQ_PICK_IMAGE = 1005;
+    private static final int REQ_PICK_UI_FONT = 1006;
     private static final long PALM_REJECTION_MS = 450L;
     private static final int MAX_STYLUS_QUEUE = 64;
     private static final int MAX_CLIPBOARD_TEXT_CHARS = 2 * 1024 * 1024;
@@ -120,6 +121,10 @@ public class FigCraftActivity extends GameActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         activeInstance = new WeakReference<>(this);
+        copyBundledUiFontIfPresent();
+        boolean isNight = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        applySystemBarIconContrast(!isNight);
+        enqueueControl("system_theme" + SEP + (isNight ? "dark" : "light"));
 
         View rootView = findViewById(android.R.id.content);
         if (rootView == null && getWindow() != null) {
@@ -157,6 +162,8 @@ public class FigCraftActivity extends GameActivity {
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        boolean isNight = (newConfig.uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        enqueueControl("system_theme" + SEP + (isNight ? "dark" : "light"));
         View decor = getWindow().getDecorView();
         if (decor != null) {
             decor.post(() -> ViewCompat.requestApplyInsets(decor));
@@ -172,6 +179,20 @@ public class FigCraftActivity extends GameActivity {
             }
         }
         super.onDestroy();
+    }
+
+    private void applySystemBarIconContrast(boolean isLightTheme) {
+        try {
+            if (getWindow() == null) return;
+            View decor = getWindow().getDecorView();
+            if (decor == null) return;
+            WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(getWindow(), decor);
+            if (controller != null) {
+                controller.setAppearanceLightStatusBars(isLightTheme);
+                controller.setAppearanceLightNavigationBars(isLightTheme);
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     private void applyImmersiveMode(boolean enable) {
@@ -282,6 +303,11 @@ public class FigCraftActivity extends GameActivity {
                     runOnUiThread(() -> applyImmersiveMode(enable));
                     return "ok";
                 }
+                case "set_light_bars": {
+                    boolean isLight = "1".equals(arg);
+                    runOnUiThread(() -> applySystemBarIconContrast(isLight));
+                    return "ok";
+                }
                 case "open_file": {
                     runOnUiThread(() -> {
                         try {
@@ -327,6 +353,19 @@ public class FigCraftActivity extends GameActivity {
                                     | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                                     | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
                             startActivityForResult(intent, REQ_SAVE_AS);
+                        } catch (Exception ignored) {
+                        }
+                    });
+                    return "ok";
+                }
+                case "pick_ui_font": {
+                    runOnUiThread(() -> {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            intent.setType("*/*");
+                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                            startActivityForResult(intent, REQ_PICK_UI_FONT);
                         } catch (Exception ignored) {
                         }
                     });
@@ -542,6 +581,31 @@ public class FigCraftActivity extends GameActivity {
                 int count = mirrorFontTreeToPrivateDir(uri);
                 enqueueControl("fonts_synced" + SEP + count);
             }).start();
+        } else if (requestCode == REQ_PICK_UI_FONT) {
+            String displayName = queryDisplayName(uri);
+            new Thread(() -> {
+                try {
+                    File dst = new File(getFilesDir(), "ui_font.custom");
+                    try (InputStream in = getContentResolver().openInputStream(uri);
+                         OutputStream out = new FileOutputStream(dst)) {
+                        if (in != null) copyStream(in, out);
+                    }
+                    enqueueControl("ui_font_picked" + SEP + dst.getAbsolutePath() + SEP + displayName);
+                } catch (Exception ignored) {
+                }
+            }).start();
+        }
+    }
+
+    private void copyBundledUiFontIfPresent() {
+        try {
+            File dst = new File(getFilesDir(), "bundled_ui_font.otf");
+            if (dst.exists() && dst.length() > 10000) return;
+            try (InputStream in = getAssets().open("ui_font.otf");
+                 OutputStream out = new FileOutputStream(dst)) {
+                copyStream(in, out);
+            }
+        } catch (Exception ignored) {
         }
     }
 
