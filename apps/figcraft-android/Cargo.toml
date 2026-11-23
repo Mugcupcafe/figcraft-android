@@ -3,19 +3,17 @@ name = "figcraft-android"
 version = "0.18.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Android ARM64 tablet shell for FigCraft with GameActivity, touch/stylus support, and embedded HTTP/SSE MCP server."
+description = "Android ARM64 tablet app for FigCraft with GameActivity, offset mouse cursor, touch/stylus support, and embedded HTTP/SSE MCP server."
 
 [lib]
 name = "figcraft_android"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Core FigCraft workspace crates (resolved when dropped into storytold/figcraft)
 figcraft-engine = { path = "../../crates/engine" }
 figcraft-ui-egui = { path = "../../crates/ui-egui", default-features = false }
-figcraft-mcp = { path = "../../crates/mcp" }
+figcraft-text = { path = "../../crates/text" }
 
-# UI / Windowing (uses workspace-patched storytold/egui 0.37; AccessKit disabled on Android)
 eframe = { version = "0.37", default-features = false, features = [
     "wgpu",
     "android-game-activity",
@@ -29,10 +27,7 @@ log = "0.4"
 android-activity = { version = "0.6.1", features = ["game-activity"] }
 android_logger = "0.15"
 jni = "0.21"
-winit = { version = "0.30", features = ["android-game-activity"] }
 
-# Note: Do NOT inherit workspace `unsafe_code = "forbid"` here, because
-# Android cdylib requires `#[unsafe(no_mangle)] fn android_main` and JNI FFI in `platform.rs`.
+# Android cdylib requires #[unsafe(no_mangle)] fn android_main and JNI FFI in platform.rs.
 [lints.rust]
 unsafe_code = "allow"
-
