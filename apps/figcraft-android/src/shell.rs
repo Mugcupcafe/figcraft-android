@@ -217,7 +217,7 @@ impl FigcraftAndroidShell {
             return false;
         }
         ctx.add_font(egui::FontInsert::new(
-            format!("android_ui_font_{label}"),
+            &format!("android_ui_font_{label}"),
             egui::FontData::from_owned(bytes),
             vec![
                 egui::InsertFontFamily {
@@ -878,7 +878,7 @@ impl eframe::App for FigcraftAndroidShell {
         self.drain_mcp_requests();
 
         // Sync Android status/nav bar icon color with FigCraft light/dark theme
-        let is_light_theme = !ctx.style().visuals.dark_mode;
+        let is_light_theme = !ui.style().visuals.dark_mode;
         if self.last_light_bars != Some(is_light_theme) {
             self.last_light_bars = Some(is_light_theme);
             self.services.set_light_system_bars(is_light_theme);
