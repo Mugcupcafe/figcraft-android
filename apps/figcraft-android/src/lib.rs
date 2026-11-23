@@ -17,7 +17,7 @@ use android_activity::AndroidApp;
 /// Android native entry point invoked by `GameActivity`.
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
-pub extern "C" fn android_main(app: AndroidApp) {
+pub fn android_main(app: AndroidApp) {
     use winit::platform::android::EventLoopBuilderExtAndroid;
 
     android_logger::init_once(
@@ -41,13 +41,23 @@ pub extern "C" fn android_main(app: AndroidApp) {
         ..Default::default()
     };
 
-    let run_result = eframe::run_native(
-        "FigCraft",
-        native_options,
-        Box::new(move |cc| Ok(Box::new(shell::FigcraftAndroidShell::new(cc, app)))),
-    );
+    let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        eframe::run_native(
+            "FigCraft",
+            native_options,
+            Box::new(move |cc| Ok(Box::new(shell::FigcraftAndroidShell::new(cc, app)))),
+        )
+    }));
 
-    if let Err(err) = run_result {
-        log::error!("eframe exited with error: {err}");
+    match unwind_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            let msg = format!("eframe exited with error: {err}");
+            log::error!("{msg}");
+            let _ = platform::call_activity("save_crash_log", &msg);
+        }
+        Err(_) => {
+            log::error!("android_main caught panic unwind (logged by panic hook)");
+        }
     }
 }
