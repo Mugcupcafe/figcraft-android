@@ -1,11 +1,6 @@
 //! Tablet touch, S Pen / USI stylus telemetry, multi-touch zoom/pan,
 //! long-press context menu (550ms + drawing lock), finger double-tap snap,
-//! Hand pan mode, and DPI-responsive Shortcut Pad (V6_hotfix).
-//!
-//! V6_hotfix fix:
-//! - Strictly scopes Hand pan, pinch-to-zoom, 24pt double-tap snap, and long-press
-//!   to `canvas_rect` so FigCraft's top file tabs, toolbar, left Layers panel, and
-//!   right Design panel are never blocked or mis-snapped.
+//! Hand pan mode, and DPI-responsive Shortcut Pad (V6_hotfix2 · egui 0.37 native).
 
 use crate::protocol::{ActivityEvent, StylusAction};
 use std::collections::BTreeMap;
@@ -21,6 +16,18 @@ pub struct VirtualModifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub space_pan: bool,
+}
+
+impl VirtualModifiers {
+    pub fn to_egui_modifiers(self) -> egui::Modifiers {
+        egui::Modifiers {
+            alt: self.alt,
+            ctrl: self.ctrl,
+            shift: self.shift,
+            mac_cmd: false,
+            command: self.ctrl,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -54,7 +61,6 @@ pub struct TabletInputState {
     pub pixels_per_point: f32,
     pub top_bar_bottom_pt: f32,
     pub shortcut_pad_rect: Option<egui::Rect>,
-    /// Actual interactive canvas rectangle inside FigCraft (excluding top tabs & side panels).
     pub canvas_rect: Option<egui::Rect>,
 
     active_touches: BTreeMap<egui::TouchId, egui::Pos2>,
@@ -65,6 +71,7 @@ pub struct TabletInputState {
     long_press: Option<LongPressTracker>,
     suppressed_touch_id: Option<egui::TouchId>,
     last_tap: Option<(Instant, egui::Pos2)>,
+    last_sent_modifiers: egui::Modifiers,
 }
 
 impl Default for TabletInputState {
@@ -92,6 +99,7 @@ impl Default for TabletInputState {
             long_press: None,
             suppressed_touch_id: None,
             last_tap: None,
+            last_sent_modifiers: egui::Modifiers::NONE,
         }
     }
 }
@@ -140,8 +148,6 @@ impl TabletInputState {
         self.long_press_enabled && self.long_press.as_ref().is_some_and(|lp| !lp.triggered)
     }
 
-    /// Returns `true` only if `pos` is inside the interactive canvas and NOT over
-    /// the top bar, Shortcut Pad, top file tabs, or side panels.
     fn is_inside_canvas(&self, pos: egui::Pos2) -> bool {
         if pos.y <= self.top_bar_bottom_pt {
             return false;
@@ -158,18 +164,14 @@ impl TabletInputState {
     }
 
     pub fn process_raw_input(&mut self, raw_input: &mut egui::RawInput) {
-        if self.modifiers.shift {
-            raw_input.modifiers.shift = true;
-        }
-        if self.modifiers.ctrl {
-            raw_input.modifiers.ctrl = true;
-            raw_input.modifiers.command = true;
-        }
-        if self.modifiers.alt {
-            raw_input.modifiers.alt = true;
+        let active_modifiers = self.modifiers.to_egui_modifiers();
+        let mut synthetic_events: Vec<egui::Event> = Vec::new();
+
+        if active_modifiers != self.last_sent_modifiers {
+            synthetic_events.push(egui::Event::ModifiersChanged(active_modifiers));
+            self.last_sent_modifiers = active_modifiers;
         }
 
-        let mut synthetic_events: Vec<egui::Event> = Vec::new();
         let mut released_suppressed = false;
         let mut hand_pan_delta = egui::Vec2::ZERO;
         let mut suppress_for_hand_pan = false;
@@ -216,7 +218,6 @@ impl TabletInputState {
                                 self.hand_pan_last_pos = None;
                             }
                         } else {
-                            // Touching tabs/layers/properties resets canvas double-tap tracking
                             self.last_tap = None;
                         }
                     }
@@ -307,7 +308,9 @@ impl TabletInputState {
                 synthetic_events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: hand_pan_delta,
-                    modifiers: raw_input.modifiers,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers: active_modifiers,
                 });
             }
         }
@@ -320,7 +323,7 @@ impl TabletInputState {
                         pos: first_pos,
                         button: egui::PointerButton::Primary,
                         pressed: false,
-                        modifiers: raw_input.modifiers,
+                        modifiers: active_modifiers,
                     });
                 }
                 synthetic_events.push(egui::Event::PointerGone);
@@ -356,7 +359,9 @@ impl TabletInputState {
                             synthetic_events.push(egui::Event::MouseWheel {
                                 unit: egui::MouseWheelUnit::Point,
                                 delta: pan_delta,
-                                modifiers: raw_input.modifiers,
+                                phase: egui::TouchPhase::Move,
+                                source: egui::MouseWheelSource::Unknown,
+                                modifiers: active_modifiers,
                             });
                         }
                     }
@@ -376,20 +381,20 @@ impl TabletInputState {
                         pos: lp.origin,
                         button: egui::PointerButton::Primary,
                         pressed: false,
-                        modifiers: raw_input.modifiers,
+                        modifiers: active_modifiers,
                     });
                     synthetic_events.push(egui::Event::PointerMoved(lp.origin));
                     synthetic_events.push(egui::Event::PointerButton {
                         pos: lp.origin,
                         button: egui::PointerButton::Secondary,
                         pressed: true,
-                        modifiers: raw_input.modifiers,
+                        modifiers: active_modifiers,
                     });
                     synthetic_events.push(egui::Event::PointerButton {
                         pos: lp.origin,
                         button: egui::PointerButton::Secondary,
                         pressed: false,
-                        modifiers: raw_input.modifiers,
+                        modifiers: active_modifiers,
                     });
                 }
             }
@@ -416,7 +421,7 @@ impl TabletInputState {
         let btn_w = ((max_pad_w - 92.0) / 9.0).clamp(38.0, 48.0);
         let btn_size = egui::vec2(btn_w, 38.0);
 
-        let area_resp = egui::Area::new(egui::Id::new("figcraft_tablet_shortcut_pad"))
+        let area_resp = egui::Area::new(egui::Id::from("figcraft_tablet_shortcut_pad"))
             .anchor(
                 egui::Align2::LEFT_BOTTOM,
                 egui::vec2(left_margin, -bottom_margin),
@@ -500,7 +505,6 @@ mod tests {
             egui::pos2(1200.0, 900.0),
         ));
 
-        // Touch in left Layers panel (x = 50)
         let mut f1 = egui::RawInput::default();
         f1.events.push(egui::Event::Touch {
             device_id: egui::TouchDeviceId(1),
@@ -517,7 +521,6 @@ mod tests {
         });
         state.process_raw_input(&mut f1);
 
-        // Must NOT be intercepted or stripped
         assert!(f1
             .events
             .iter()
