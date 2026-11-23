@@ -1,4 +1,4 @@
-//! Android platform services for FigCraft (V6_hotfix).
+//! Android platform services for FigCraft (V6_hotfix2).
 
 use crate::platform;
 use crate::protocol::{BridgeReply, SEP};
@@ -15,7 +15,7 @@ pub struct AndroidShellPrefs {
 impl Default for AndroidShellPrefs {
     fn default() -> Self {
         Self {
-            ui_zoom_factor: 1.25, // Comfortable default for 13.3" 3200x2136 tablets
+            ui_zoom_factor: 1.25,
             immersive_mode: false,
         }
     }
@@ -49,10 +49,12 @@ impl AndroidServices {
     }
 
     pub fn load_prefs(&self) -> AndroidShellPrefs {
-        fs::read_to_string(&self.prefs_path)
+        let mut prefs: AndroidShellPrefs = fs::read_to_string(&self.prefs_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        prefs.ui_zoom_factor = prefs.ui_zoom_factor.clamp(0.75, 2.0);
+        prefs
     }
 
     pub fn save_prefs(&self, prefs: &AndroidShellPrefs) {
