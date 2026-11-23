@@ -45,7 +45,6 @@ impl ToolbarButtonId {
         Self::Group,
         Self::ZoomFit,
         Self::Mouse,
-        Self::UiZoom,
         Self::Fullscreen,
         Self::Fonts,
         Self::UiFont,
@@ -67,8 +66,7 @@ impl ToolbarButtonId {
             Self::Redo,
             Self::Delete,
             Self::Mouse,
-            Self::UiZoom,
-            Self::Fullscreen,
+                Self::Fullscreen,
             Self::Pad,
         ]
     }
@@ -99,20 +97,34 @@ impl ToolbarButtonId {
     }
 }
 
+fn default_mouse_cursor_scale() -> f32 {
+    1.0
+}
+
+fn default_mouse_grip_distance() -> f32 {
+    52.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AndroidShellPrefs {
     pub ui_zoom_factor: f32,
     pub immersive_mode: bool,
     #[serde(default = "ToolbarButtonId::default_bar")]
     pub toolbar_buttons: Vec<ToolbarButtonId>,
+    #[serde(default = "default_mouse_cursor_scale")]
+    pub mouse_cursor_scale: f32,
+    #[serde(default = "default_mouse_grip_distance")]
+    pub mouse_grip_distance: f32,
 }
 
 impl Default for AndroidShellPrefs {
     fn default() -> Self {
         Self {
-            ui_zoom_factor: 1.25,
+            ui_zoom_factor: 1.0,
             immersive_mode: false,
             toolbar_buttons: ToolbarButtonId::default_bar(),
+            mouse_cursor_scale: default_mouse_cursor_scale(),
+            mouse_grip_distance: default_mouse_grip_distance(),
         }
     }
 }
@@ -149,7 +161,10 @@ impl AndroidServices {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        prefs.ui_zoom_factor = prefs.ui_zoom_factor.clamp(0.75, 2.0);
+        prefs.ui_zoom_factor = 1.0;
+        prefs.toolbar_buttons.retain(|b| *b != ToolbarButtonId::UiZoom);
+        prefs.mouse_cursor_scale = prefs.mouse_cursor_scale.clamp(0.6, 2.0);
+        prefs.mouse_grip_distance = prefs.mouse_grip_distance.clamp(24.0, 120.0);
         prefs
     }
 
@@ -275,6 +290,41 @@ impl AndroidServices {
         Ok(())
     }
 
+    pub fn read_recovery_snapshots(&self) -> Vec<Vec<u8>> {
+        let mut entries: Vec<PathBuf> = fs::read_dir(&self.recovery_dir)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("figcraft"))
+            .collect();
+        entries.sort();
+        entries
+            .into_iter()
+            .filter_map(|p| fs::read(p).ok())
+            .filter(|b| !b.is_empty())
+            .collect()
+    }
+
+    pub fn replace_recovery_snapshots(recovery_dir: &Path, snapshots: &[Vec<u8>]) {
+        let _ = fs::create_dir_all(recovery_dir);
+        if let Ok(read) = fs::read_dir(recovery_dir) {
+            for entry in read.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("figcraft") {
+                    let _ = fs::remove_file(p);
+                }
+            }
+        }
+        for (idx, bytes) in snapshots.iter().enumerate() {
+            let tmp = recovery_dir.join(format!("snap_{idx:03}.tmp"));
+            let dst = recovery_dir.join(format!("snap_{idx:03}.figcraft"));
+            if fs::write(&tmp, bytes).is_ok() {
+                let _ = fs::rename(&tmp, &dst);
+            }
+        }
+    }
+
     pub fn font_search_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
         let system_fonts = Path::new("/system/fonts");
@@ -298,4 +348,29 @@ pub fn install_panic_hook(app: &android_activity::AndroidApp) {
         let _ = fs::write(&log_path, &msg);
         let _ = platform::call_activity("save_crash_log", &msg);
     }));
+}
+
+
+pub fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
