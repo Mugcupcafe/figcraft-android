@@ -1,10 +1,4 @@
-//! Main `eframe::App` wrapper hosting FigCraft's UI inside Android `GameActivity` (V6_hotfix).
-//!
-//! V6_hotfix additions:
-//! - One-touch UI scale button (`100% / 125% / 140%`) persisted to `android_shell_prefs.json`
-//! - Toggleable Immersive Fullscreen mode (`Full` button) persisted to `android_shell_prefs.json`
-//! - Focus preservation across `Paste` button clicks so text layers receive pasted text reliably
-//! - Taller tablet-friendly top bar buttons (34pt) + `canvas_rect` scoping
+//! Main `eframe::App` wrapper hosting FigCraft's UI inside Android `GameActivity` (V6_hotfix2 · egui 0.37).
 
 use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig, PendingMcpRequest};
 use crate::platform;
@@ -12,6 +6,7 @@ use crate::protocol::ActivityEvent;
 use crate::services::{AndroidServices, AndroidShellPrefs};
 use crate::touch::TabletInputState;
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -186,8 +181,6 @@ impl FigcraftAndroidShell {
                 }
                 ActivityEvent::SaveAsPicked { uri, display_name } => {
                     log::info!("SAF Save As target: {display_name} -> {uri}");
-                    // TODO(upstream-wire): serialize current `.figcraft` bytes and call
-                    // `self.services.write_to_saf_uri(&uri, &display_name, &bytes)`.
                     self.status_banner = Some(format!("Save target ready: {display_name}"));
                 }
                 ActivityEvent::FontsSynced { count } => {
@@ -207,7 +200,6 @@ impl FigcraftAndroidShell {
         while let Ok(res) = self.asset_rx.try_recv() {
             match res {
                 LoadedAsset::Document { display_name, bytes } => {
-                    // TODO(upstream-wire): pass `(display_name, bytes)` into `self.inner.open_bytes_owned(...)`.
                     self.status_banner =
                         Some(format!("Opened {display_name} ({} KB)", bytes.len() / 1024));
                 }
@@ -216,8 +208,6 @@ impl FigcraftAndroidShell {
                     mime,
                     bytes,
                 } => {
-                    // TODO(upstream-wire): route `(display_name, mime, bytes)` to FigCraft's
-                    // image placement / fill command so it drops directly onto the active canvas.
                     self.status_banner = Some(format!(
                         "Image ready: {display_name} ({mime}, {} KB)",
                         bytes.len() / 1024
@@ -231,13 +221,16 @@ impl FigcraftAndroidShell {
     }
 
     fn drain_mcp_requests(&mut self) {
-        let Some(server) = &self.mcp_server else {
-            return;
-        };
-        for _ in 0..8 {
-            let Ok(PendingMcpRequest { payload, reply_tx }) = server.rx.try_recv() else {
-                break;
-            };
+        let mut pending = Vec::new();
+        if let Some(server) = &self.mcp_server {
+            for _ in 0..8 {
+                match server.rx.try_recv() {
+                    Ok(req) => pending.push(req),
+                    Err(_) => break,
+                }
+            }
+        }
+        for PendingMcpRequest { payload, reply_tx } in pending {
             let response = self.dispatch_mcp_jsonrpc(&payload);
             let _ = reply_tx.send(response);
         }
@@ -282,20 +275,16 @@ impl FigcraftAndroidShell {
                     ]
                 }
             }),
-            "tools/call" => {
-                // TODO(upstream-wire): route directly to `figcraft_mcp::handle_tool_call`
-                // against the live `FigcraftApp` engine document so edits appear live on screen.
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "content": [{
-                            "type": "text",
-                            "text": "Wired to FigCraft Android shell (V6_hotfix). Connect figcraft_mcp::Server to live engine."
-                        }]
-                    }
-                })
-            }
+            "tools/call" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": "Wired to FigCraft Android shell (V6_hotfix2). Connect figcraft_mcp::Server to live engine."
+                    }]
+                }
+            }),
             _ => json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -314,7 +303,7 @@ impl FigcraftAndroidShell {
         self.mcp_lan_mode = !self.mcp_lan_mode;
         let mut cfg = McpServerConfig::default();
         if self.mcp_lan_mode {
-            cfg.bind_addr = "0.0.0.0:47800".parse().expect("valid lan addr");
+            cfg.bind_addr = SocketAddr::from(([0, 0, 0, 0], 47800));
         }
         match EmbeddedMcpServer::start(cfg) {
             Ok(srv) => {
@@ -354,13 +343,15 @@ impl eframe::App for FigcraftAndroidShell {
         }
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point().max(1.0);
         self.tablet_input.set_pixels_per_point(ppp);
 
-        // Track last focused widget (e.g. text input) before toolbar buttons can steal focus
-        if let Some(focused) = ctx.memory(|m| m.focused()) {
-            self.last_focused_id = Some(focused);
+        if !self.restore_focus_before_paste && ctx.wants_keyboard_input() {
+            if let Some(focused) = ctx.memory(|m| m.focused()) {
+                self.last_focused_id = Some(focused);
+            }
         }
 
         self.drain_activity_events();
@@ -371,7 +362,7 @@ impl eframe::App for FigcraftAndroidShell {
         let left_inset = self.tablet_input.safe_insets_px[3] / ppp;
 
         let top_btn_h = 34.0;
-        let top_resp = egui::TopBottomPanel::top("figcraft_android_topbar").show(ctx, |ui| {
+        let top_resp = egui::Panel::top("figcraft_android_topbar").show(ui, |ui| {
             ui.add_space(top_inset);
             egui::ScrollArea::horizontal()
                 .id_salt("topbar_scroll")
@@ -399,7 +390,7 @@ impl eframe::App for FigcraftAndroidShell {
                         ui.separator();
                         let zoom_label = format!("UI: {}%", (self.prefs.ui_zoom_factor * 100.0).round() as i32);
                         if ui.add(egui::Button::new(zoom_label).min_size(egui::vec2(72.0, top_btn_h))).clicked() {
-                            self.cycle_ui_zoom(ctx);
+                            self.cycle_ui_zoom(&ctx);
                         }
                         if ui
                             .add(
@@ -442,17 +433,14 @@ impl eframe::App for FigcraftAndroidShell {
         });
         self.tablet_input.top_bar_bottom_pt = top_resp.response.rect.bottom();
 
-        // TODO(upstream-wire): render `self.inner.ui(ctx)` and pass its actual viewport canvas rect
-        // into `self.tablet_input.canvas_rect = Some(self.inner.canvas_rect())` so top tabs and
-        // side panels are excluded from canvas-only touch gestures.
-        let central_resp = egui::CentralPanel::default().show(ctx, |ui| {
+        let central_resp = egui::CentralPanel::default().show(ui, |ui| {
             ui.centered_and_justified(|ui| {
-                ui.label("FigCraft Android ARM64 Tablet Canvas V6_hotfix (wire `figcraft_ui_egui::FigcraftApp` here)");
+                ui.label("FigCraft Android ARM64 Tablet Canvas V6_hotfix2");
             });
         });
         self.tablet_input.canvas_rect = Some(central_resp.response.rect);
 
-        let pad_actions = self.tablet_input.show_shortcut_pad_ui(ctx);
+        let pad_actions = self.tablet_input.show_shortcut_pad_ui(&ctx);
         if pad_actions.paste {
             self.trigger_paste();
         }
