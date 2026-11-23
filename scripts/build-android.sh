@@ -14,6 +14,7 @@ fi
 HOST_TAG="linux-x86_64"
 if [[ "$(uname -s)" == "Darwin" ]]; then
   HOST_TAG="darwin-x86_64"
+  if [[ -d "$SDK_DIR/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/darwin-arm64" ]]; then HOST_TAG="darwin-arm64"; fi
 fi
 
 NDK="$SDK_DIR/ndk/${NDK_VERSION}"
