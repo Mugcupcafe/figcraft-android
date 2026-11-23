@@ -30,6 +30,7 @@ import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
+import android.view.inputmethod.TextAttribute;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -576,6 +577,7 @@ public class FigCraftActivity extends GameActivity {
                     final String finalMime = mime;
                     final Uri finalUri = uri;
                     final int idx = i;
+                    final String displayName = ensureImageExtension(queryDisplayName(uri), finalMime, "drop_" + idx);
                     new Thread(() -> {
                         try {
                             File staged = new File(getCacheDir(), "drop_" + System.currentTimeMillis() + "_" + idx + ".img");
@@ -583,7 +585,7 @@ public class FigCraftActivity extends GameActivity {
                                  OutputStream out = new FileOutputStream(staged)) {
                                 if (in != null) {
                                     copyStream(in, out);
-                                    enqueueControl("clipboard_image" + SEP + staged.getAbsolutePath() + SEP + finalMime);
+                                    enqueueControl("drop_image" + SEP + staged.getAbsolutePath() + SEP + displayName + SEP + finalMime);
                                 }
                             }
                         } catch (Exception ignored) {
@@ -617,12 +619,42 @@ public class FigCraftActivity extends GameActivity {
         }
     }
 
+    private static String ensureImageExtension(String name, String mime, String fallbackBase) {
+        String base = (name == null || name.isEmpty() || "untitled.figcraft".equals(name)) ? fallbackBase : name;
+        String lower = base.toLowerCase(Locale.US);
+        if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+                || lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".svg")) {
+            return base;
+        }
+        if ("image/jpeg".equals(mime) || "image/jpg".equals(mime)) return base + ".jpg";
+        if ("image/webp".equals(mime)) return base + ".webp";
+        if ("image/gif".equals(mime)) return base + ".gif";
+        if ("image/svg+xml".equals(mime)) return base + ".svg";
+        return base + ".png";
+    }
+
+    private void disableSurfaceViewFocus(View root) {
+        if (root == null) return;
+        if (root instanceof android.view.SurfaceView) {
+            root.setFocusable(false);
+            root.setFocusableInTouchMode(false);
+            return;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup vg = (ViewGroup) root;
+            for (int i = 0; i < vg.getChildCount(); i++) {
+                disableSurfaceViewFocus(vg.getChildAt(i));
+            }
+        }
+    }
+
     private void setupImeBridgeView() {
         try {
             ViewGroup content = findViewById(android.R.id.content);
             if (content == null || imeBridgeView != null) return;
+            disableSurfaceViewFocus(content);
             imeBridgeView = new ImeBridgeView(this);
-            ViewGroup.LayoutParams lp = new ViewGroup.LayoutParams(1, 1);
+            ViewGroup.LayoutParams lp = new ViewGroup.LayoutParams(4, 4);
             content.addView(imeBridgeView, lp);
         } catch (Exception ignored) {
         }
@@ -638,14 +670,22 @@ public class FigCraftActivity extends GameActivity {
             View target = imeBridgeView != null ? imeBridgeView : getWindow().getDecorView();
             if (target == null) return;
             if (show) {
+                disableSurfaceViewFocus(findViewById(android.R.id.content));
+                target.setVisibility(View.VISIBLE);
                 target.setFocusable(true);
                 target.setFocusableInTouchMode(true);
-                target.requestFocus();
                 if (imeBridgeView != null) {
                     imeBridgeView.resetComposing();
                 }
-                imm.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT);
-                enqueueControl("ime_state" + SEP + "1");
+                target.post(() -> {
+                    target.requestFocusFromTouch();
+                    target.requestFocus();
+                    imm.restartInput(target);
+                    if (!imm.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT)) {
+                        imm.showSoftInput(target, InputMethodManager.SHOW_FORCED);
+                    }
+                    enqueueControl("ime_state" + SEP + "1");
+                });
             } else {
                 imm.hideSoftInputFromWindow(target.getWindowToken(), 0);
                 target.clearFocus();
@@ -656,7 +696,7 @@ public class FigCraftActivity extends GameActivity {
     }
 
     /**
-     * Hidden 1x1 native Android View providing a full BaseInputConnection so Korean IME
+     * Transparent 4x4 native Android View providing a full BaseInputConnection so Korean IME
      * composition, English, numbers, symbols, Backspace, and Enter are reliably delivered to egui.
      */
     private class ImeBridgeView extends View {
@@ -666,7 +706,7 @@ public class FigCraftActivity extends GameActivity {
             super(context);
             setFocusable(true);
             setFocusableInTouchMode(true);
-            setAlpha(0f);
+            setBackgroundColor(android.graphics.Color.TRANSPARENT);
         }
 
         void resetComposing() {
@@ -680,8 +720,12 @@ public class FigCraftActivity extends GameActivity {
 
         @Override
         public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-            outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_ACTION_DONE;
+            outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+            outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
+                    | EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                    | EditorInfo.IME_ACTION_NONE;
             return new BaseInputConnection(this, true) {
                 @Override
                 public boolean setComposingText(CharSequence text, int newCursorPosition) {
@@ -729,6 +773,38 @@ public class FigCraftActivity extends GameActivity {
                 }
 
                 @Override
+                public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
+                    if (!lastComposing.isEmpty()) {
+                        lastComposing = "";
+                        enqueueControl("ime_preedit" + SEP);
+                    }
+                    int count = Math.max(0, Math.min(beforeLength, 16));
+                    for (int i = 0; i < count; i++) {
+                        enqueueControl("ime_key" + SEP + "backspace");
+                    }
+                    return super.deleteSurroundingTextInCodePoints(beforeLength, afterLength);
+                }
+
+                @Override
+                public boolean replaceText(int start, int end, CharSequence text, int newCursorPosition, TextAttribute textAttribute) {
+                    String s = text != null ? text.toString() : "";
+                    boolean wasComposing = !lastComposing.isEmpty();
+                    lastComposing = "";
+                    if (!wasComposing) {
+                        int deleted = Math.max(0, end - start);
+                        for (int i = 0; i < Math.min(deleted, 16); i++) {
+                            enqueueControl("ime_key" + SEP + "backspace");
+                        }
+                    }
+                    if (!s.isEmpty()) {
+                        enqueueControl("ime_commit" + SEP + s);
+                    } else if (wasComposing) {
+                        enqueueControl("ime_preedit" + SEP);
+                    }
+                    return super.replaceText(start, end, text, newCursorPosition, textAttribute);
+                }
+
+                @Override
                 public boolean performEditorAction(int editorAction) {
                     if (!lastComposing.isEmpty()) {
                         String committed = lastComposing;
@@ -772,6 +848,45 @@ public class FigCraftActivity extends GameActivity {
                 }
             };
         }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event != null && imeBridgeView != null && imeBridgeView.hasFocus()) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                int code = event.getKeyCode();
+                if (code == KeyEvent.KEYCODE_DEL) {
+                    enqueueControl("ime_key" + SEP + "backspace");
+                    return true;
+                } else if (code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER) {
+                    if (!imeBridgeView.lastComposing.isEmpty()) {
+                        String committed = imeBridgeView.lastComposing;
+                        imeBridgeView.resetComposing();
+                        enqueueControl("ime_commit" + SEP + committed);
+                    }
+                    enqueueControl("ime_key" + SEP + "enter");
+                    return true;
+                } else if (code == KeyEvent.KEYCODE_TAB) {
+                    enqueueControl("ime_key" + SEP + "tab");
+                    return true;
+                } else if (code == KeyEvent.KEYCODE_ESCAPE) {
+                    enqueueControl("ime_key" + SEP + "escape");
+                    return true;
+                } else {
+                    int ch = event.getUnicodeChar();
+                    if (ch >= 32) {
+                        enqueueControl("ime_commit" + SEP + String.valueOf((char) ch));
+                        return true;
+                    }
+                }
+            } else if (event.getAction() == KeyEvent.ACTION_MULTIPLE
+                    && event.getKeyCode() == KeyEvent.KEYCODE_UNKNOWN
+                    && event.getCharacters() != null) {
+                enqueueControl("ime_commit" + SEP + event.getCharacters());
+                return true;
+            }
+        }
+        return super.dispatchKeyEvent(event);
     }
 
     @Override
