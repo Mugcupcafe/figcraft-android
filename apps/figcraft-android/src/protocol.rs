@@ -39,6 +39,10 @@ pub enum ActivityEvent {
         left: f32,
     },
     ImeChanged { visible: bool, height: f32 },
+    ImePreedit(String),
+    ImeCommit(String),
+    ImeKey(String),
+    ImeState(bool),
     StylusSample {
         x: f32,
         y: f32,
@@ -49,6 +53,8 @@ pub enum ActivityEvent {
         action: StylusAction,
     },
     SystemTheme { dark: bool },
+    FilesDir(String),
+    AppPaused,
     McpServiceStopped,
 }
 
@@ -65,6 +71,12 @@ impl ActivityEvent {
         // Use split_once first so clipboard_text preserves any embedded content intact.
         if let Some(rest) = line.strip_prefix(&format!("clipboard_text{SEP}")) {
             return Some(Self::ClipboardText(rest.to_owned()));
+        }
+        if let Some(rest) = line.strip_prefix(&format!("ime_preedit{SEP}")) {
+            return Some(Self::ImePreedit(rest.to_owned()));
+        }
+        if let Some(rest) = line.strip_prefix(&format!("ime_commit{SEP}")) {
+            return Some(Self::ImeCommit(rest.to_owned()));
         }
 
         let mut parts = line.split(SEP);
@@ -104,6 +116,8 @@ impl ActivityEvent {
                 visible: parts.next()? == "1",
                 height: parts.next()?.parse().ok()?,
             }),
+            "ime_key" => Some(Self::ImeKey(parts.next()?.to_owned())),
+            "ime_state" => Some(Self::ImeState(parts.next()? == "1")),
             "stylus" => {
                 let action = match parts.next()? {
                     "down" => StylusAction::Down,
@@ -121,9 +135,11 @@ impl ActivityEvent {
                     is_eraser: parts.next()? == "1",
                 })
             }
+            "files_dir" => Some(Self::FilesDir(parts.next()?.to_owned())),
             "system_theme" => Some(Self::SystemTheme {
                 dark: parts.next()? == "dark",
             }),
+            "app_paused" => Some(Self::AppPaused),
             "mcp_stopped" => Some(Self::McpServiceStopped),
             _ => None,
         }
