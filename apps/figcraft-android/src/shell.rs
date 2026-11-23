@@ -1,8 +1,8 @@
 //! Main `eframe::App` wrapper hosting the real `figcraft_ui_egui::FigApp` inside Android `GameActivity` (V8 · egui 0.37).
 
-use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig, PendingMcpRequest};
+use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig};
 use crate::platform;
-use crate::protocol::ActivityEvent;
+use crate::protocol::{ActivityEvent, StylusAction};
 use crate::services::{AndroidServices, AndroidShellPrefs};
 use crate::touch::TabletInputState;
 use figcraft_engine::Session;
@@ -115,7 +115,7 @@ pub struct FigcraftAndroidShell {
 
 impl FigcraftAndroidShell {
     #[cfg(target_os = "android")]
-    pub fn new(cc: &eframe::CreationContext<_>, app: android_activity::AndroidApp) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, app: android_activity::AndroidApp) -> Self {
         let internal_dir = app
             .internal_data_path()
             .unwrap_or_else(|| PathBuf::from("/data/local/tmp/figcraft"));
@@ -123,11 +123,11 @@ impl FigcraftAndroidShell {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub fn new(cc: &eframe::CreationContext<_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         Self::init_common(cc, std::env::temp_dir().join("figcraft-android-sim"))
     }
 
-    fn init_common(cc: &eframe::CreationContext<_>, internal_dir: PathBuf) -> Self {
+    fn init_common(cc: &eframe::CreationContext<'_>, internal_dir: PathBuf) -> Self {
         let services = AndroidServices::new(internal_dir.clone());
         let prefs = services.load_prefs();
         cc.egui_ctx.set_zoom_factor(prefs.ui_zoom_factor);
@@ -314,7 +314,7 @@ impl FigcraftAndroidShell {
     fn drain_activity_events(&mut self) {
         for ev in platform::poll_activity_events() {
             match ev {
-                ActivityEvent::Insets {
+                ActivityEvent::WindowInsets {
                     top,
                     right,
                     bottom,
@@ -322,10 +322,10 @@ impl FigcraftAndroidShell {
                 } => {
                     self.tablet_input.safe_insets_px = [top, right, bottom, left];
                 }
-                ActivityEvent::Ime { visible, height } => {
+                ActivityEvent::ImeChanged { visible, height } => {
                     self.tablet_input.ime_height_px = if visible { height } else { 0.0 };
                 }
-                ActivityEvent::Stylus {
+                ActivityEvent::StylusSample {
                     action,
                     x,
                     y,
@@ -334,33 +334,36 @@ impl FigcraftAndroidShell {
                     tilt_y,
                     is_eraser,
                 } => {
+                    let action_str = match action {
+                        StylusAction::Down => "down",
+                        StylusAction::Move => "move",
+                        StylusAction::Up => "up",
+                        StylusAction::Hover => "hover",
+                    };
                     self.tablet_input
-                        .on_stylus_event(&action, x, y, pressure, tilt_x, tilt_y, is_eraser);
+                        .on_stylus_event(action_str, x, y, pressure, tilt_x, tilt_y, is_eraser);
                 }
-                ActivityEvent::FileOpened {
-                    staged_path,
-                    display_name,
-                } => {
+                ActivityEvent::FileOpened { path, display_name } => {
                     self.status_banner = Some(format!("Loading {display_name}..."));
-                    self.spawn_async_file_read(staged_path, display_name);
+                    self.spawn_async_file_read(path, display_name);
                 }
                 ActivityEvent::ImagePicked {
-                    staged_path,
+                    path,
                     display_name,
                     mime,
                 } => {
                     self.status_banner = Some(format!("Importing {display_name}..."));
-                    self.spawn_async_image_read(staged_path, display_name, mime);
+                    self.spawn_async_image_read(path, display_name, mime);
                 }
-                ActivityEvent::ClipboardText { text } => {
+                ActivityEvent::ClipboardText(text) => {
                     self.pending_paste_text = Some(text);
                     self.status_banner = Some("Pasted text from clipboard".into());
                 }
-                ActivityEvent::ClipboardImage { staged_path, mime } => {
+                ActivityEvent::ClipboardImage { path, mime } => {
                     self.status_banner = Some("Pasting image...".into());
-                    self.spawn_async_image_read(staged_path, "clipboard-image.png".into(), mime);
+                    self.spawn_async_image_read(path, "clipboard-image.png".into(), mime);
                 }
-                ActivityEvent::SaveAs { uri, display_name } => {
+                ActivityEvent::SaveAsPicked { uri, display_name } => {
                     self.status_banner = Some(format!("Use FigCraft Export/Save -> Downloads ({display_name})"));
                     let _ = uri;
                 }
@@ -370,7 +373,7 @@ impl FigcraftAndroidShell {
                     });
                     self.status_banner = Some(format!("Synced {count} user font(s)"));
                 }
-                ActivityEvent::McpStopped => {
+                ActivityEvent::McpServiceStopped => {
                     self.mcp_server = None;
                     self.mcp_lan_mode = false;
                     self.status_banner = Some("MCP stopped from notification".into());
