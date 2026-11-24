@@ -60,6 +60,9 @@ pub enum ActivityEvent {
     DriveAuth { signed_in: bool, email: String },
     DriveIndex(String),
     DriveStatus(String),
+    DriveCreds { client_id: String, client_secret: String },
+    NativeText(String),
+    RenameCanvas(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +90,12 @@ impl ActivityEvent {
         }
         if let Some(rest) = line.strip_prefix(&format!("drive_status{SEP}")) {
             return Some(Self::DriveStatus(rest.to_owned()));
+        }
+        if let Some(rest) = line.strip_prefix(&format!("native_text{SEP}")) {
+            return Some(Self::NativeText(rest.to_owned()));
+        }
+        if let Some(rest) = line.strip_prefix(&format!("rename_canvas{SEP}")) {
+            return Some(Self::RenameCanvas(rest.to_owned()));
         }
 
         let mut parts = line.split(SEP);
@@ -159,6 +168,10 @@ impl ActivityEvent {
             "drive_auth" => Some(Self::DriveAuth {
                 signed_in: parts.next()? == "1",
                 email: parts.next().unwrap_or("").to_owned(),
+            }),
+            "drive_creds" => Some(Self::DriveCreds {
+                client_id: parts.next()?.to_owned(),
+                client_secret: parts.next().unwrap_or("").to_owned(),
             }),
             _ => None,
         }
