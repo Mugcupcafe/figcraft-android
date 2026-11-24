@@ -1,5 +1,6 @@
-//! Floating draggable circular AI Agent mascot bubble + dedicated AI canvas cursor &
-//! created/modified element highlights for FigCraft Mobile (V26).
+//! Floating draggable circular AI Agent mascot with Muse-style bottom card,
+//! 18 detailed Korean action states with custom colorful vector mini-icons,
+//! dedicated AI canvas cursor, and created/modified element highlights (V27).
 
 use crate::services::AndroidShellPrefs;
 use egui::{Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
@@ -16,7 +17,7 @@ const AGENT_PAUSED_RGBA: &[u8] = include_bytes!("../assets/agent_paused.rgba");
 
 const MAX_LOG_ENTRIES: usize = 8;
 const MAX_HIGHLIGHTS: usize = 6;
-const WORKING_HOLD_SECS: f32 = 2.0;
+const WORKING_HOLD_SECS: f32 = 2.1;
 const DONE_HOLD_SECS: f32 = 5.0;
 const HIGHLIGHT_TTL_SECS: f32 = 3.4;
 const CURSOR_HOLD_SECS: f32 = 4.2;
@@ -45,6 +46,324 @@ impl AgentVisualState {
             Self::Working => Color32::from_rgb(64, 224, 255),
             Self::Done => Color32::from_rgb(72, 224, 134),
             Self::Paused => Color32::from_rgb(245, 194, 84),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionCategory {
+    Frame,
+    Shape,
+    Text,
+    Typography,
+    ColorFill,
+    Stroke,
+    Effect,
+    AutoLayout,
+    Transform,
+    Vector,
+    Boolean,
+    Image,
+    Component,
+    Variable,
+    Prototype,
+    Cleanup,
+    Inspect,
+    ExportSave,
+    Done,
+    Paused,
+    Generic,
+}
+
+impl ActionCategory {
+    pub fn from_command(cmd: &str, params: Option<&Value>) -> Self {
+        let c = cmd.trim();
+        let node_type = params
+            .and_then(|p| p.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+
+        if c.starts_with("frame.") || c.starts_with("section.") || (c == "create_node" && (node_type == "frame" || node_type == "section")) {
+            Self::Frame
+        } else if c.starts_with("shape.") || c.starts_with("node.create") || c == "create_node" || c == "tool.place" {
+            if node_type == "text" {
+                Self::Text
+            } else if node_type == "component" {
+                Self::Component
+            } else if node_type == "vector" {
+                Self::Vector
+            } else {
+                Self::Shape
+            }
+        } else if c.starts_with("text.style")
+            || c.starts_with("text.font")
+            || c.starts_with("text.setVariations")
+            || c.starts_with("text.list")
+            || c.starts_with("text.rescan")
+            || c.starts_with("text.refit")
+        {
+            Self::Typography
+        } else if c.starts_with("text.") || c == "type_text" {
+            Self::Text
+        } else if c.starts_with("stroke.") {
+            Self::Stroke
+        } else if c.starts_with("effect.") {
+            Self::Effect
+        } else if c.starts_with("fill.") || c.starts_with("style.") || c.starts_with("node.set") || c == "set_properties" {
+            Self::ColorFill
+        } else if c.starts_with("layout.") {
+            Self::AutoLayout
+        } else if c.starts_with("node.move")
+            || c.starts_with("node.resize")
+            || c.starts_with("align.")
+            || c.starts_with("distribute.")
+            || c.starts_with("transform.")
+            || c.starts_with("object.")
+        {
+            Self::Transform
+        } else if c.starts_with("vector.") {
+            Self::Vector
+        } else if c.starts_with("bool.") || c.starts_with("shapeBuilder.") {
+            Self::Boolean
+        } else if c.starts_with("image.") {
+            Self::Image
+        } else if c.starts_with("component.") || c.starts_with("instance.") || c.starts_with("library.") {
+            Self::Component
+        } else if c.starts_with("variable.") {
+            Self::Variable
+        } else if c.starts_with("proto.") {
+            Self::Prototype
+        } else if c.starts_with("node.delete")
+            || c.starts_with("edit.")
+            || c == "undo"
+            || c == "redo"
+        {
+            Self::Cleanup
+        } else if c.starts_with("file.")
+            || c.starts_with("export")
+            || c == "screenshot"
+            || c.starts_with("template.")
+            || c.starts_with("version.")
+            || c.starts_with("branch.")
+            || c == "save_file"
+            || c == "open_file"
+        {
+            Self::ExportSave
+        } else if c.starts_with("doc.")
+            || c.starts_with("page.")
+            || c.starts_with("node.get")
+            || c.starts_with("node.list")
+            || c.starts_with("inspect")
+            || c.starts_with("select.")
+            || c.starts_with("measure.")
+            || c == "get_node"
+            || c == "figcraft.status"
+        {
+            Self::Inspect
+        } else {
+            Self::Generic
+        }
+    }
+
+    pub fn label_ko(self, raw_cmd: &str) -> String {
+        match self {
+            Self::Frame => "프레임 만드는 중".into(),
+            Self::Shape => "도형 그리는 중".into(),
+            Self::Text => "텍스트 작성 중".into(),
+            Self::Typography => "글꼴 스타일 조정 중".into(),
+            Self::ColorFill => "색상 입히는 중".into(),
+            Self::Stroke => "테두리 다듬는 중".into(),
+            Self::Effect => "이펙트 적용 중".into(),
+            Self::AutoLayout => "오토 레이아웃 맞추는 중".into(),
+            Self::Transform => "위치·크기 맞추는 중".into(),
+            Self::Vector => "벡터 패스 다듬는 중".into(),
+            Self::Boolean => "도형 결합하는 중".into(),
+            Self::Image => "이미지 배치하는 중".into(),
+            Self::Component => "컴포넌트 구성 중".into(),
+            Self::Variable => "변수·토큰 연결 중".into(),
+            Self::Prototype => "프로토타입 연결 중".into(),
+            Self::Cleanup => "요소 정리하는 중".into(),
+            Self::Inspect => "캔버스 구조 확인 중".into(),
+            Self::ExportSave => "파일 저장·내보내는 중".into(),
+            Self::Done => "작업 완료!".into(),
+            Self::Paused => "일시정지됨".into(),
+            Self::Generic => {
+                let c = raw_cmd.trim();
+                if c.is_empty() {
+                    "AI 작업 중".into()
+                } else {
+                    format!("{c} 실행 중")
+                }
+            }
+        }
+    }
+
+    /// Draws a crisp 14x14 colorful vector mini-icon (zero emoji-font dependency).
+    pub fn paint_icon(self, painter: &egui::Painter, center: Pos2) {
+        match self {
+            Self::Frame => {
+                let col = Color32::from_rgb(76, 224, 178);
+                let r = Rect::from_center_size(center, Vec2::splat(9.0));
+                painter.rect_stroke(r, CornerRadius::same(1), Stroke::new(1.5, col), StrokeKind::Middle);
+                // Hash extensions like Figma frame icon
+                painter.line_segment([Pos2::new(r.left() - 2.0, r.top()), Pos2::new(r.right() + 2.0, r.top())], Stroke::new(1.3, col));
+                painter.line_segment([Pos2::new(r.left() - 2.0, r.bottom()), Pos2::new(r.right() + 2.0, r.bottom())], Stroke::new(1.3, col));
+                painter.line_segment([Pos2::new(r.left(), r.top() - 2.0), Pos2::new(r.left(), r.bottom() + 2.0)], Stroke::new(1.3, col));
+                painter.line_segment([Pos2::new(r.right(), r.top() - 2.0), Pos2::new(r.right(), r.bottom() + 2.0)], Stroke::new(1.3, col));
+            }
+            Self::Shape => {
+                let r = Rect::from_center_size(center + Vec2::new(-1.8, 1.5), Vec2::splat(7.5));
+                painter.rect_filled(r, CornerRadius::same(2), Color32::from_rgb(76, 196, 255));
+                painter.circle_filled(center + Vec2::new(2.5, -2.0), 3.6, Color32::from_rgb(122, 238, 198));
+            }
+            Self::Text => {
+                let col = Color32::from_rgb(86, 172, 255);
+                painter.rect_filled(Rect::from_center_size(center, Vec2::splat(13.0)), CornerRadius::same(3), Color32::from_rgba_unmultiplied(86, 172, 255, 45));
+                painter.text(center, egui::Align2::CENTER_CENTER, "T", FontId::proportional(11.5), col);
+            }
+            Self::Typography => {
+                let col = Color32::from_rgb(186, 134, 255);
+                painter.text(center, egui::Align2::CENTER_CENTER, "Aa", FontId::proportional(10.0), col);
+            }
+            Self::ColorFill => {
+                painter.circle_filled(center + Vec2::new(-3.0, -2.0), 3.2, Color32::from_rgb(255, 114, 132));
+                painter.circle_filled(center + Vec2::new(3.0, -2.0), 3.2, Color32::from_rgb(255, 212, 86));
+                painter.circle_filled(center + Vec2::new(0.0, 2.8), 3.2, Color32::from_rgb(76, 214, 255));
+            }
+            Self::Stroke => {
+                let col = Color32::from_rgb(255, 168, 76);
+                painter.line_segment(
+                    [center + Vec2::new(-4.8, 4.2), center + Vec2::new(4.8, -4.2)],
+                    Stroke::new(2.4, col),
+                );
+                painter.circle_filled(center + Vec2::new(-4.8, 4.2), 2.0, Color32::WHITE);
+                painter.circle_filled(center + Vec2::new(4.8, -4.2), 2.0, Color32::WHITE);
+            }
+            Self::Effect => {
+                let col = Color32::from_rgb(255, 218, 86);
+                // 4-point sparkle star
+                let s = 6.0;
+                let m = 2.0;
+                let pts = [
+                    center + Vec2::new(0.0, -s),
+                    center + Vec2::new(m, -m),
+                    center + Vec2::new(s, 0.0),
+                    center + Vec2::new(m, m),
+                    center + Vec2::new(0.0, s),
+                    center + Vec2::new(-m, m),
+                    center + Vec2::new(-s, 0.0),
+                    center + Vec2::new(-m, -m),
+                ];
+                painter.add(egui::Shape::convex_polygon(vec![pts[0], pts[1], pts[3], pts[4], pts[5], pts[7]], col, Stroke::NONE));
+                painter.add(egui::Shape::convex_polygon(vec![pts[2], pts[3], pts[5], pts[6], pts[7], pts[1]], col, Stroke::NONE));
+            }
+            Self::AutoLayout => {
+                let col = Color32::from_rgb(84, 228, 146);
+                for dx in [-4.0_f32, 0.0, 4.0] {
+                    let bar = Rect::from_center_size(center + Vec2::new(dx, 0.0), Vec2::new(2.5, 10.0));
+                    painter.rect_filled(bar, CornerRadius::same(1), col);
+                }
+            }
+            Self::Transform => {
+                let col = Color32::from_rgb(82, 232, 206);
+                painter.line_segment([center + Vec2::new(-5.0, 0.0), center + Vec2::new(5.0, 0.0)], Stroke::new(1.7, col));
+                painter.line_segment([center + Vec2::new(0.0, -5.0), center + Vec2::new(0.0, 5.0)], Stroke::new(1.7, col));
+                painter.circle_filled(center, 2.0, col);
+            }
+            Self::Vector => {
+                let col = Color32::from_rgb(255, 152, 82);
+                let tip = center + Vec2::new(4.5, -4.5);
+                let a = center + Vec2::new(-4.5, 4.5);
+                let b = center + Vec2::new(-1.5, -2.5);
+                let c = center + Vec2::new(2.5, 1.5);
+                painter.add(egui::Shape::convex_polygon(vec![tip, b, a, c], col, Stroke::NONE));
+                painter.circle_filled(center, 1.4, Color32::from_rgb(24, 28, 34));
+            }
+            Self::Boolean => {
+                let c1 = Color32::from_rgba_unmultiplied(180, 128, 255, 220);
+                let c2 = Color32::from_rgba_unmultiplied(92, 212, 255, 220);
+                painter.circle_filled(center + Vec2::new(-2.4, 0.0), 4.0, c1);
+                painter.circle_filled(center + Vec2::new(2.4, 0.0), 4.0, c2);
+            }
+            Self::Image => {
+                let frame = Rect::from_center_size(center, Vec2::new(12.0, 10.0));
+                painter.rect_filled(frame, CornerRadius::same(2), Color32::from_rgb(248, 128, 178));
+                painter.circle_filled(center + Vec2::new(2.8, -2.2), 1.5, Color32::from_rgb(255, 240, 150));
+                painter.add(egui::Shape::convex_polygon(
+                    vec![
+                        Pos2::new(frame.left() + 1.5, frame.bottom() - 1.0),
+                        Pos2::new(center.x - 1.0, center.y - 0.5),
+                        Pos2::new(frame.right() - 1.5, frame.bottom() - 1.0),
+                    ],
+                    Color32::from_rgb(255, 230, 240),
+                    Stroke::NONE,
+                ));
+            }
+            Self::Component => {
+                let col = Color32::from_rgb(176, 124, 255);
+                for (dx, dy) in [(0.0, -3.4), (3.4, 0.0), (0.0, 3.4), (-3.4, 0.0)] {
+                    let c = center + Vec2::new(dx, dy);
+                    let r = 2.1;
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            c + Vec2::new(0.0, -r),
+                            c + Vec2::new(r, 0.0),
+                            c + Vec2::new(0.0, r),
+                            c + Vec2::new(-r, 0.0),
+                        ],
+                        col,
+                        Stroke::NONE,
+                    ));
+                }
+            }
+            Self::Variable => {
+                let col = Color32::from_rgb(76, 218, 242);
+                painter.line_segment([center + Vec2::new(-5.0, -2.6), center + Vec2::new(5.0, -2.6)], Stroke::new(1.5, col));
+                painter.circle_filled(center + Vec2::new(-1.8, -2.6), 2.2, col);
+                painter.line_segment([center + Vec2::new(-5.0, 2.6), center + Vec2::new(5.0, 2.6)], Stroke::new(1.5, col));
+                painter.circle_filled(center + Vec2::new(2.0, 2.6), 2.2, col);
+            }
+            Self::Prototype => {
+                let col = Color32::from_rgb(86, 176, 255);
+                painter.circle_stroke(center + Vec2::new(-3.6, 0.0), 2.4, Stroke::new(1.6, col));
+                painter.line_segment([center + Vec2::new(-1.0, 0.0), center + Vec2::new(4.8, 0.0)], Stroke::new(1.7, col));
+                painter.line_segment([center + Vec2::new(2.2, -2.6), center + Vec2::new(4.8, 0.0)], Stroke::new(1.7, col));
+                painter.line_segment([center + Vec2::new(2.2, 2.6), center + Vec2::new(4.8, 0.0)], Stroke::new(1.7, col));
+            }
+            Self::Cleanup => {
+                let col = Color32::from_rgb(255, 126, 126);
+                let body = Rect::from_center_size(center + Vec2::new(0.0, 1.4), Vec2::new(8.0, 7.6));
+                painter.rect_filled(body, CornerRadius::same(1), col);
+                painter.line_segment([center + Vec2::new(-5.2, -3.2), center + Vec2::new(5.2, -3.2)], Stroke::new(1.8, col));
+                painter.line_segment([center + Vec2::new(-2.0, -5.0), center + Vec2::new(2.0, -5.0)], Stroke::new(1.6, col));
+            }
+            Self::Inspect => {
+                let col = Color32::from_rgb(138, 206, 255);
+                painter.circle_stroke(center + Vec2::new(-1.4, -1.4), 4.0, Stroke::new(1.8, col));
+                painter.line_segment([center + Vec2::new(1.6, 1.6), center + Vec2::new(5.2, 5.2)], Stroke::new(2.0, col));
+            }
+            Self::ExportSave => {
+                let col = Color32::from_rgb(82, 226, 146);
+                painter.line_segment([center + Vec2::new(0.0, -5.0), center + Vec2::new(0.0, 2.5)], Stroke::new(1.8, col));
+                painter.line_segment([center + Vec2::new(-3.0, -0.4), center + Vec2::new(0.0, 2.5)], Stroke::new(1.8, col));
+                painter.line_segment([center + Vec2::new(3.0, -0.4), center + Vec2::new(0.0, 2.5)], Stroke::new(1.8, col));
+                painter.line_segment([center + Vec2::new(-4.8, 4.8), center + Vec2::new(4.8, 4.8)], Stroke::new(1.8, col));
+            }
+            Self::Done => {
+                let col = Color32::from_rgb(72, 224, 134);
+                painter.circle_filled(center, 6.2, col);
+                painter.line_segment([center + Vec2::new(-2.8, 0.2), center + Vec2::new(-0.6, 2.5)], Stroke::new(1.8, Color32::from_rgb(14, 24, 20)));
+                painter.line_segment([center + Vec2::new(-0.6, 2.5), center + Vec2::new(3.2, -2.2)], Stroke::new(1.8, Color32::from_rgb(14, 24, 20)));
+            }
+            Self::Paused => {
+                let col = Color32::from_rgb(245, 194, 84);
+                painter.circle_filled(center, 6.2, col);
+                painter.line_segment([center + Vec2::new(-1.8, -2.6), center + Vec2::new(-1.8, 2.6)], Stroke::new(2.0, Color32::from_rgb(24, 22, 16)));
+                painter.line_segment([center + Vec2::new(1.8, -2.6), center + Vec2::new(1.8, 2.6)], Stroke::new(2.0, Color32::from_rgb(24, 22, 16)));
+            }
+            Self::Generic => {
+                painter.circle_filled(center, 4.5, Color32::from_rgb(98, 236, 204));
+            }
         }
     }
 }
@@ -86,6 +405,7 @@ pub struct ElementHighlight {
 pub struct AgentLogEntry {
     pub summary: String,
     pub raw_cmd: String,
+    pub category: ActionCategory,
     pub ok: bool,
     pub at: Instant,
 }
@@ -104,29 +424,35 @@ struct AgentTextures {
 }
 
 struct DemoStep {
-    rel_rect: [f32; 4], // normalized [x, y, w, h] inside canvas_rect
+    rel_rect: [f32; 4],
     label: &'static str,
-    action_label: &'static str,
+    category: ActionCategory,
     kind: HighlightKind,
 }
 
 const DEMO_STEPS: &[DemoStep] = &[
     DemoStep {
-        rel_rect: [0.18, 0.22, 0.28, 0.22],
+        rel_rect: [0.16, 0.20, 0.30, 0.24],
         label: "Hero Card",
-        action_label: "프레임 생성 중",
+        category: ActionCategory::Frame,
         kind: HighlightKind::Created,
     },
     DemoStep {
-        rel_rect: [0.22, 0.27, 0.20, 0.06],
-        label: "제목 텍스트",
-        action_label: "텍스트 수정 중",
+        rel_rect: [0.20, 0.25, 0.22, 0.06],
+        label: "헤더 제목",
+        category: ActionCategory::Text,
         kind: HighlightKind::Modified,
     },
     DemoStep {
-        rel_rect: [0.54, 0.46, 0.22, 0.14],
-        label: "CTA 버튼",
-        action_label: "스타일 꾸미는 중",
+        rel_rect: [0.52, 0.24, 0.24, 0.16],
+        label: "그라데이션 배경",
+        category: ActionCategory::ColorFill,
+        kind: HighlightKind::Modified,
+    },
+    DemoStep {
+        rel_rect: [0.52, 0.46, 0.24, 0.14],
+        label: "버튼 리스트",
+        category: ActionCategory::AutoLayout,
         kind: HighlightKind::Created,
     },
 ];
@@ -134,18 +460,22 @@ const DEMO_STEPS: &[DemoStep] = &[
 pub struct AgentBubbleState {
     textures: Option<AgentTextures>,
     pub paused: bool,
+    detected_client_name: Option<String>,
     preview_override: Option<(AgentVisualState, Instant)>,
     last_work_at: Option<Instant>,
     done_entered_at: Option<Instant>,
     last_visual_state: AgentVisualState,
     burst_count: u32,
     current_task_text: String,
+    current_category: ActionCategory,
     last_done_text: String,
     logs: VecDeque<AgentLogEntry>,
     pub popover_open: bool,
     popover_open_seq: u64,
     dragging: bool,
-    drag_total_dist: f32,
+    drag_moved: bool,
+    drag_origin: Option<Pos2>,
+    drag_start_bubble_pos: Option<Pos2>,
     bubble_pos: Option<Pos2>,
 
     // Dedicated AI canvas cursor & element highlights
@@ -164,18 +494,22 @@ impl Default for AgentBubbleState {
         Self {
             textures: None,
             paused: false,
+            detected_client_name: None,
             preview_override: None,
             last_work_at: None,
             done_entered_at: None,
             last_visual_state: AgentVisualState::Idle,
             burst_count: 0,
             current_task_text: String::new(),
+            current_category: ActionCategory::Generic,
             last_done_text: String::new(),
             logs: VecDeque::with_capacity(MAX_LOG_ENTRIES),
             popover_open: false,
             popover_open_seq: 0,
             dragging: false,
-            drag_total_dist: 0.0,
+            drag_moved: false,
+            drag_origin: None,
+            drag_start_bubble_pos: None,
             bubble_pos: None,
             cursor_pos: None,
             cursor_target: None,
@@ -190,43 +524,40 @@ impl Default for AgentBubbleState {
 }
 
 impl AgentBubbleState {
-    pub fn friendly_command_label(cmd: &str) -> String {
-        let c = cmd.trim();
-        if c.starts_with("node.create") || c.starts_with("shape.") || c.starts_with("frame.") || c == "create_node" {
-            "도형·프레임 그리는 중".into()
-        } else if c.starts_with("text.") || c == "type_text" {
-            "텍스트 편집 중".into()
-        } else if c.starts_with("node.set")
-            || c == "set_properties"
-            || c.starts_with("style.")
-            || c.starts_with("fill.")
-            || c.starts_with("stroke.")
-            || c.starts_with("effect.")
-        {
-            "스타일 꾸미는 중".into()
-        } else if c.starts_with("node.move")
-            || c.starts_with("node.resize")
-            || c.starts_with("layout.")
-            || c.starts_with("align.")
-            || c.starts_with("distribute.")
-            || c.starts_with("transform.")
-        {
-            "레이아웃 정리 중".into()
-        } else if c.starts_with("node.delete") || c.starts_with("edit.delete") {
-            "요소 정리 중".into()
-        } else if c.starts_with("image.") {
-            "이미지 배치 중".into()
-        } else if c.starts_with("doc.") || c.starts_with("page.") || c.starts_with("node.get") || c.starts_with("node.list") {
-            "캔버스 구조 확인 중".into()
-        } else if c.starts_with("edit.undo") || c.starts_with("edit.redo") {
-            "작업 되돌리는 중".into()
-        } else if c == "figcraft.status" {
-            "연결 상태 확인 중".into()
-        } else if c.is_empty() {
-            "AI 작업 중".into()
-        } else {
-            format!("{c} 실행 중")
+    pub fn set_detected_client_name(&mut self, raw: &str) {
+        let low = raw.trim().to_ascii_lowercase();
+        if low.is_empty() {
+            return;
         }
+        let nice = if low.contains("gemini") {
+            "Gemini".to_owned()
+        } else if low.contains("claude") {
+            "Claude".to_owned()
+        } else if low.contains("chatgpt") || low.contains("openai") || low.contains("gpt") {
+            "ChatGPT".to_owned()
+        } else if low.contains("muse") {
+            "Muse".to_owned()
+        } else if low.contains("grok") {
+            "Grok".to_owned()
+        } else if low.contains("deepseek") {
+            "DeepSeek".to_owned()
+        } else if low.contains("cursor") {
+            "Cursor".to_owned()
+        } else {
+            raw.trim().chars().take(18).collect()
+        };
+        self.detected_client_name = Some(nice);
+    }
+
+    pub fn display_agent_name(&self, prefs: &AndroidShellPrefs) -> String {
+        let custom = prefs.ai_agent_name.trim();
+        if !custom.is_empty() {
+            return custom.to_owned();
+        }
+        if let Some(det) = &self.detected_client_name {
+            return det.clone();
+        }
+        "Gemini".to_owned()
     }
 
     fn classify_kind(cmd: &str) -> HighlightKind {
@@ -298,7 +629,8 @@ impl AgentBubbleState {
         canvas_rect: Option<Rect>,
     ) {
         let now = Instant::now();
-        let summary = Self::friendly_command_label(raw_cmd);
+        let category = ActionCategory::from_command(raw_cmd, params);
+        let summary = category.label_ko(raw_cmd);
         let within_burst = self
             .last_work_at
             .map(|t| now.duration_since(t).as_secs_f32() < WORKING_HOLD_SECS + 1.5)
@@ -312,6 +644,7 @@ impl AgentBubbleState {
         self.preview_override = None;
         self.demo_started_at = None;
         self.current_task_text = summary.clone();
+        self.current_category = category;
         self.last_done_text = if self.burst_count > 1 {
             format!("완료 · {}개 작업", self.burst_count)
         } else {
@@ -324,11 +657,11 @@ impl AgentBubbleState {
         self.logs.push_front(AgentLogEntry {
             summary: summary.clone(),
             raw_cmd: raw_cmd.to_owned(),
+            category,
             ok,
             at: now,
         });
 
-        // Update AI canvas cursor & highlight target when a visual edit happened
         if ok && raw_cmd != "figcraft.status" {
             let bounds = output
                 .and_then(Self::extract_bounds_from_value)
@@ -337,24 +670,26 @@ impl AgentBubbleState {
 
             if let Some(canvas) = canvas_rect {
                 let (screen_rect, elem_name) = if let Some((px, py, pw, ph, name)) = bounds {
-                    // Map page coordinates into canvas viewport cleanly, clamped inside visible canvas
                     let origin = canvas.left_top() + Vec2::new(60.0, 60.0);
                     let raw_min = origin + Vec2::new(px, py);
                     let clamped_w = pw.clamp(28.0, (canvas.width() * 0.72).max(40.0));
                     let clamped_h = ph.clamp(24.0, (canvas.height() * 0.68).max(32.0));
-                    let min_x = raw_min
-                        .x
-                        .clamp(canvas.left() + 18.0, (canvas.right() - clamped_w - 18.0).max(canvas.left() + 18.0));
-                    let min_y = raw_min
-                        .y
-                        .clamp(canvas.top() + 24.0, (canvas.bottom() - clamped_h - 24.0).max(canvas.top() + 24.0));
+                    let min_x = raw_min.x.clamp(
+                        canvas.left() + 18.0,
+                        (canvas.right() - clamped_w - 18.0).max(canvas.left() + 18.0),
+                    );
+                    let min_y = raw_min.y.clamp(
+                        canvas.top() + 24.0,
+                        (canvas.bottom() - clamped_h - 24.0).max(canvas.top() + 24.0),
+                    );
                     (
                         Rect::from_min_size(Pos2::new(min_x, min_y), Vec2::new(clamped_w, clamped_h)),
                         name,
                     )
                 } else {
-                    // No explicit coordinates in command: place a gentle focused marker near canvas center
-                    let hash = raw_cmd.bytes().fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
+                    let hash = raw_cmd
+                        .bytes()
+                        .fold(0u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
                     let ox = ((hash % 9) as f32 - 4.0) * 26.0;
                     let oy = (((hash / 9) % 7) as f32 - 3.0) * 20.0;
                     let c = canvas.center() + Vec2::new(ox, oy);
@@ -367,8 +702,11 @@ impl AgentBubbleState {
                 };
                 self.push_highlight(screen_rect, label, kind, now);
                 self.set_cursor_target(
-                    Pos2::new(screen_rect.left() + screen_rect.width() * 0.25, screen_rect.top() + screen_rect.height() * 0.35),
-                    format!("AI · {summary}"),
+                    Pos2::new(
+                        screen_rect.left() + screen_rect.width() * 0.25,
+                        screen_rect.top() + screen_rect.height() * 0.35,
+                    ),
+                    summary,
                     now,
                 );
             }
@@ -389,7 +727,6 @@ impl AgentBubbleState {
 
     fn set_cursor_target(&mut self, target: Pos2, label: String, now: Instant) {
         if self.cursor_pos.is_none() {
-            // Start smoothly from the AI bubble position if known
             let start = self.bubble_pos.unwrap_or(target + Vec2::new(40.0, 40.0));
             self.cursor_pos = Some(start);
         }
@@ -426,6 +763,7 @@ impl AgentBubbleState {
                     canvas_rect.height() * step.rel_rect[3],
                 ),
             );
+            let act_text = step.category.label_ko("");
             self.push_highlight(
                 r,
                 format!("{} · {}", step.kind.tag_ko(), step.label),
@@ -434,11 +772,12 @@ impl AgentBubbleState {
             );
             self.set_cursor_target(
                 Pos2::new(r.left() + r.width() * 0.22, r.top() + r.height() * 0.35),
-                format!("AI · {}", step.action_label),
+                act_text.clone(),
                 now,
             );
             self.last_work_at = Some(now);
-            self.current_task_text = step.action_label.to_owned();
+            self.current_task_text = act_text;
+            self.current_category = step.category;
             self.burst_count = (desired_idx + 1) as u32;
             self.last_done_text = format!("완료 · {}개 작업", self.burst_count);
             self.demo_step_index = desired_idx + 1;
@@ -480,10 +819,7 @@ impl AgentBubbleState {
 
     pub fn needs_repaint(&mut self) -> bool {
         let now = Instant::now();
-        let cursor_alive = self
-            .cursor_active_until
-            .map(|u| now < u)
-            .unwrap_or(false);
+        let cursor_alive = self.cursor_active_until.map(|u| now < u).unwrap_or(false);
         let highlights_alive = !self.highlights.is_empty();
         matches!(
             self.current_state(),
@@ -515,6 +851,7 @@ impl AgentBubbleState {
         ctx: &egui::Context,
         prefs: &AndroidShellPrefs,
         canvas_rect: Rect,
+        agent_name: &str,
         now: Instant,
         dt: f32,
     ) {
@@ -522,11 +859,9 @@ impl AgentBubbleState {
             return;
         }
 
-        // Expire old highlights
         self.highlights
             .retain(|h| now.duration_since(h.created_at).as_secs_f32() < HIGHLIGHT_TTL_SECS);
 
-        // Smoothly interpolate AI cursor toward target
         if let (Some(cur), Some(target)) = (self.cursor_pos, self.cursor_target) {
             let alpha = 1.0 - (-10.5 * dt.clamp(0.001, 0.1)).exp();
             let next = Pos2::new(
@@ -555,7 +890,6 @@ impl AgentBubbleState {
             .show(ctx, |ui| {
                 let painter = ui.painter();
 
-                // 1. Paint created / modified element highlights
                 for hl in &self.highlights {
                     let age = now.duration_since(hl.created_at).as_secs_f32();
                     let fade_in = (age / 0.18).clamp(0.0, 1.0);
@@ -564,7 +898,6 @@ impl AgentBubbleState {
                     let base = hl.kind.color();
                     let pulse = (t * 6.0).sin() * 0.5 + 0.5;
 
-                    // Soft tinted fill + outer glow + crisp border
                     let fill = Color32::from_rgba_unmultiplied(
                         base.r(),
                         base.g(),
@@ -598,7 +931,6 @@ impl AgentBubbleState {
                         StrokeKind::Inside,
                     );
 
-                    // Top-left compact badge pill (e.g., "생성 · Hero Card")
                     let galley = painter.layout_no_wrap(
                         hl.label.clone(),
                         FontId::proportional(11.0),
@@ -623,7 +955,6 @@ impl AgentBubbleState {
                     painter.galley(badge_min + Vec2::new(6.0, 2.5), galley, Color32::BLACK);
                 }
 
-                // 2. Paint dedicated Figma-style AI Agent cursor + floating action label
                 if cursor_remaining > 0.0 {
                     if let Some(tip) = self.cursor_pos {
                         let fade = (cursor_remaining / 0.6).clamp(0.0, 1.0);
@@ -631,7 +962,6 @@ impl AgentBubbleState {
                         let outline = Color32::from_rgba_unmultiplied(18, 28, 32, (240.0 * fade) as u8);
                         let shadow = Color32::from_rgba_unmultiplied(0, 0, 0, (90.0 * fade) as u8);
 
-                        // Crisp concave-safe pointer arrow (2 convex triangles + stem quad + outline)
                         let draw_arrow = |offset: Vec2, fill: Color32, stroke: Stroke| {
                             let p0 = tip + offset;
                             let p1 = tip + offset + Vec2::new(0.0, 19.0);
@@ -654,10 +984,10 @@ impl AgentBubbleState {
                         draw_arrow(Vec2::new(1.5, 2.0), shadow, Stroke::NONE);
                         draw_arrow(Vec2::ZERO, mint, Stroke::new(1.4, outline));
 
-                        // Attached rounded action label pill next to the cursor
                         if !self.cursor_label.is_empty() {
+                            let full_label = format!("{agent_name} · {}", self.cursor_label);
                             let galley = painter.layout_no_wrap(
-                                self.cursor_label.clone(),
+                                full_label,
                                 FontId::proportional(11.5),
                                 Color32::from_rgba_unmultiplied(14, 24, 26, (250.0 * fade) as u8),
                             );
@@ -710,8 +1040,9 @@ impl AgentBubbleState {
             )
         });
 
+        let agent_name = self.display_agent_name(prefs);
         self.tick_demo(eff_canvas, now);
-        self.paint_canvas_cursor_and_highlights(ctx, prefs, eff_canvas, now, dt);
+        self.paint_canvas_cursor_and_highlights(ctx, prefs, eff_canvas, &agent_name, now, dt);
 
         if !prefs.ai_bubble_visible {
             self.popover_open = false;
@@ -721,18 +1052,20 @@ impl AgentBubbleState {
         self.ensure_textures(ctx);
         let state = self.current_state();
         let size = prefs.ai_bubble_size.clamp(36.0, 96.0);
+        let dark_mode = ctx.style().visuals.dark_mode;
 
         let min_x = screen.left() + 8.0;
         let max_x = (screen.right() - size - 8.0).max(min_x);
         let min_y = (top_bar_bottom + 10.0).max(screen.top() + 56.0);
-        let max_y = (screen.bottom() - size - 18.0).max(min_y);
+        // Leave enough room at bottom for the centered name/status card under the circular icon
+        let max_y = (screen.bottom() - size - 78.0).max(min_y);
 
         let initial_pos = if let Some(p) = self.bubble_pos {
             p
         } else if prefs.ai_bubble_pos_x >= 0.0 && prefs.ai_bubble_pos_y >= 0.0 {
             Pos2::new(prefs.ai_bubble_pos_x, prefs.ai_bubble_pos_y)
         } else {
-            Pos2::new(max_x - 10.0, (max_y - 68.0).max(min_y))
+            Pos2::new(max_x - 14.0, (max_y - 36.0).max(min_y))
         };
         let mut pos = Pos2::new(
             initial_pos.x.clamp(min_x, max_x),
@@ -742,7 +1075,7 @@ impl AgentBubbleState {
 
         let t = ctx.input(|i| i.time) as f32;
 
-        // Character micro-animations (bobbing/breathing while Working, pop bounce on Done)
+        // Character micro-animations
         let (anim_dy, anim_scale) = match state {
             AgentVisualState::Working => {
                 let dy = (t * 4.5).sin() * 3.0;
@@ -765,7 +1098,137 @@ impl AgentBubbleState {
             _ => (0.0, 1.0),
         };
 
-        // Floating draggable circular icon area
+        // 1. Paint Muse-style bottom-center card UNDER the circular avatar (drawn first so avatar overlaps its top edge!)
+        let status_row: Option<(ActionCategory, String)> = if !prefs.ai_bubble_show_speech || self.popover_open {
+            None
+        } else {
+            match state {
+                AgentVisualState::Working => {
+                    let dots = match ((t * 2.8) as usize) % 3 {
+                        0 => ".",
+                        1 => "..",
+                        _ => "...",
+                    };
+                    let base = if self.current_task_text.is_empty() {
+                        "AI 작업 중"
+                    } else {
+                        self.current_task_text.as_str()
+                    };
+                    Some((self.current_category, format!("{base}{dots}")))
+                }
+                AgentVisualState::Done => Some((
+                    ActionCategory::Done,
+                    if self.last_done_text.is_empty() {
+                        "작업 완료!".into()
+                    } else {
+                        self.last_done_text.clone()
+                    },
+                )),
+                AgentVisualState::Paused => Some((ActionCategory::Paused, "일시정지됨".into())),
+                AgentVisualState::Idle => None,
+            }
+        };
+
+        if !self.popover_open {
+            let bubble_cx = pos.x + size * 0.5;
+            let card_bg = if dark_mode {
+                Color32::from_rgba_unmultiplied(30, 34, 42, 242)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 248)
+            };
+            let title_col = if dark_mode {
+                Color32::from_rgb(245, 248, 252)
+            } else {
+                Color32::from_rgb(20, 24, 30)
+            };
+            let sub_col = if dark_mode {
+                Color32::from_rgb(198, 208, 220)
+            } else {
+                Color32::from_rgb(92, 100, 112)
+            };
+            let card_stroke = if status_row.is_some() {
+                Stroke::new(1.2, state.accent_color())
+            } else if dark_mode {
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32))
+            } else {
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 22))
+            };
+
+            // Measure card size cleanly
+            let (card_w, card_h, overlap_y) = if let Some((_, ref status_txt)) = status_row {
+                let text_w = (status_txt.chars().count() as f32 * 9.5 + 48.0).clamp(138.0, 250.0);
+                let name_w = (agent_name.chars().count() as f32 * 10.5 + 32.0).max(96.0);
+                (text_w.max(name_w), 62.0, (size * 0.24).clamp(10.0, 20.0))
+            } else {
+                // Idle: compact name pill just below the circular avatar (like 17870.jpg)
+                let name_w = (agent_name.chars().count() as f32 * 9.5 + 24.0).clamp(62.0, 148.0);
+                (name_w, 26.0, 6.0)
+            };
+
+            let card_x = (bubble_cx - card_w * 0.5).clamp(
+                screen.left() + 8.0,
+                (screen.right() - card_w - 8.0).max(screen.left() + 8.0),
+            );
+            let card_y = (pos.y + size - overlap_y).min(screen.bottom() - card_h - 8.0);
+            let card_rect = Rect::from_min_size(Pos2::new(card_x, card_y), Vec2::new(card_w, card_h));
+
+            egui::Area::new(egui::Id::unique("figcraft_ai_agent_bottom_card"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(card_rect.left_top())
+                .interactable(false)
+                .show(ctx, |ui| {
+                    let painter = ui.painter();
+                    let radius = if status_row.is_some() { 16 } else { 13 };
+                    // Soft card shadow
+                    painter.rect_filled(
+                        card_rect.translate(Vec2::new(0.0, 3.0)),
+                        CornerRadius::same(radius),
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 75),
+                    );
+                    painter.rect_filled(card_rect, CornerRadius::same(radius), card_bg);
+                    painter.rect_stroke(card_rect, CornerRadius::same(radius), card_stroke, StrokeKind::Inside);
+
+                    if let Some((cat, status_txt)) = &status_row {
+                        // Line 1: Bold AI Name centered below overlap
+                        let name_y = card_rect.top() + overlap_y * 0.65 + 12.0;
+                        painter.text(
+                            Pos2::new(card_rect.center().x, name_y),
+                            egui::Align2::CENTER_CENTER,
+                            &agent_name,
+                            FontId::proportional(14.5),
+                            title_col,
+                        );
+                        // Line 2: Colorful vector mini-icon + action status centered
+                        let status_galley = painter.layout_no_wrap(
+                            status_txt.clone(),
+                            FontId::proportional(12.0),
+                            sub_col,
+                        );
+                        let icon_w = 16.0;
+                        let gap = 5.0;
+                        let total_w = icon_w + gap + status_galley.size().x;
+                        let start_x = card_rect.center().x - total_w * 0.5;
+                        let row_y = card_rect.bottom() - 15.0;
+                        cat.paint_icon(painter, Pos2::new(start_x + icon_w * 0.5, row_y));
+                        painter.galley(
+                            Pos2::new(start_x + icon_w + gap, row_y - status_galley.size().y * 0.5),
+                            status_galley,
+                            sub_col,
+                        );
+                    } else {
+                        // Compact idle name pill
+                        painter.text(
+                            Pos2::new(card_rect.center().x, card_rect.center().y + 1.5),
+                            egui::Align2::CENTER_CENTER,
+                            &agent_name,
+                            FontId::proportional(12.5),
+                            title_col,
+                        );
+                    }
+                });
+        }
+
+        // 2. Paint Floating Draggable Circular Avatar ON TOP of the bottom card (Muse overlap effect)
         let pad = 12.0;
         let area_pos = Pos2::new(pos.x - pad, pos.y - pad);
         egui::Area::new(egui::Id::unique("figcraft_ai_agent_bubble"))
@@ -781,26 +1244,51 @@ impl AgentBubbleState {
                 let draw_size = size * anim_scale;
                 let icon_rect = Rect::from_center_size(draw_center, Vec2::splat(draw_size));
 
+                let pointer_pos = ctx.input(|i| i.pointer.interact_pos());
                 if resp.drag_started() {
                     self.dragging = true;
-                    self.drag_total_dist = 0.0;
+                    self.drag_moved = false;
+                    self.drag_origin = pointer_pos;
+                    self.drag_start_bubble_pos = Some(pos);
                 }
                 if resp.dragged() {
-                    let delta = resp.drag_delta();
-                    self.drag_total_dist += delta.length();
-                    pos.x = (pos.x + delta.x).clamp(min_x, max_x);
-                    pos.y = (pos.y + delta.y).clamp(min_y, max_y);
-                    self.bubble_pos = Some(pos);
+                    if let (Some(origin), Some(cur), Some(start_b)) =
+                        (self.drag_origin, pointer_pos, self.drag_start_bubble_pos)
+                    {
+                        let offset = cur - origin;
+                        if self.drag_moved || offset.length() >= 14.0 {
+                            self.drag_moved = true;
+                            pos.x = (start_b.x + offset.x).clamp(min_x, max_x);
+                            pos.y = (start_b.y + offset.y).clamp(min_y, max_y);
+                            self.bubble_pos = Some(pos);
+                        }
+                    } else {
+                        let delta = resp.drag_delta();
+                        if delta.length() >= 4.0 {
+                            self.drag_moved = true;
+                            pos.x = (pos.x + delta.x).clamp(min_x, max_x);
+                            pos.y = (pos.y + delta.y).clamp(min_y, max_y);
+                            self.bubble_pos = Some(pos);
+                        }
+                    }
                 }
+                let mut tapped = false;
                 if resp.drag_stopped() {
-                    self.dragging = false;
-                    if self.drag_total_dist >= 6.0 {
+                    if self.drag_moved {
                         prefs.ai_bubble_pos_x = pos.x;
                         prefs.ai_bubble_pos_y = pos.y;
                         actions.prefs_dirty = true;
+                    } else {
+                        tapped = true;
                     }
+                    self.dragging = false;
+                    self.drag_moved = false;
+                    self.drag_origin = None;
+                    self.drag_start_bubble_pos = None;
+                } else if resp.clicked() {
+                    tapped = true;
                 }
-                if resp.clicked() && self.drag_total_dist < 6.0 {
+                if tapped {
                     self.popover_open = !self.popover_open;
                     if self.popover_open {
                         self.popover_open_seq = self.popover_open_seq.wrapping_add(1);
@@ -830,7 +1318,6 @@ impl AgentBubbleState {
                         ),
                     );
 
-                    // Rotating 115-degree bright arc
                     let start_ang = t * 4.2;
                     let arc_r = radius + 3.2;
                     let segs = 16;
@@ -846,7 +1333,6 @@ impl AgentBubbleState {
                     ));
                 }
 
-                // Draw Mint Mochi Cat-Spirit sprite
                 if let Some(texs) = &self.textures {
                     let tex = match state {
                         AgentVisualState::Idle => &texs.idle,
@@ -862,7 +1348,7 @@ impl AgentBubbleState {
                     );
                 }
 
-                // Done: celebratory mint & gold confetti burst for 1.2s
+                // Done: celebratory mint & gold confetti burst
                 if state == AgentVisualState::Done {
                     if let Some(done_at) = self.done_entered_at {
                         let age = now.duration_since(done_at).as_secs_f32();
@@ -922,88 +1408,23 @@ impl AgentBubbleState {
                 }
             });
 
-        // Live speech pill next to the bubble (with animated dots while Working)
-        let speech_text: Option<String> = if !prefs.ai_bubble_show_speech || self.popover_open {
-            None
-        } else {
-            match state {
-                AgentVisualState::Working => {
-                    let dots = match ((t * 2.8) as usize) % 3 {
-                        0 => ".",
-                        1 => "..",
-                        _ => "...",
-                    };
-                    let base = if self.current_task_text.is_empty() {
-                        "AI 작업 중"
-                    } else {
-                        self.current_task_text.as_str()
-                    };
-                    Some(format!("{base}{dots}"))
-                }
-                AgentVisualState::Done => Some(if self.last_done_text.is_empty() {
-                    "작업 완료!".into()
-                } else {
-                    self.last_done_text.clone()
-                }),
-                AgentVisualState::Paused => Some("일시정지됨".into()),
-                AgentVisualState::Idle => None,
-            }
-        };
-
-        if let Some(text) = speech_text {
-            let on_right_half = (pos.x + size * 0.5) > screen.center().x;
-            let pill_h = 28.0;
-            let est_w = (text.chars().count() as f32 * 11.5 + 28.0).clamp(96.0, 250.0);
-            let pill_x = if on_right_half {
-                (pos.x - est_w - 8.0).max(screen.left() + 8.0)
-            } else {
-                (pos.x + size + 8.0).min(screen.right() - est_w - 8.0)
-            };
-            let pill_y = pos.y + (size - pill_h) * 0.5;
-
-            egui::Area::new(egui::Id::unique("figcraft_ai_agent_speech"))
-                .order(egui::Order::Foreground)
-                .fixed_pos(Pos2::new(pill_x, pill_y))
-                .interactable(false)
-                .show(ctx, |ui| {
-                    let frame = egui::Frame::NONE
-                        .fill(Color32::from_rgba_unmultiplied(22, 26, 33, 235))
-                        .stroke(Stroke::new(1.2, state.accent_color()))
-                        .corner_radius(CornerRadius::same(14))
-                        .inner_margin(egui::Margin::symmetric(11, 5));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            let (dot_rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-                            ui.painter()
-                                .circle_filled(dot_rect.center(), 3.5, state.accent_color());
-                            ui.label(
-                                egui::RichText::new(text)
-                                    .font(FontId::proportional(12.5))
-                                    .color(Color32::from_rgb(240, 246, 250)),
-                            );
-                        });
-                    });
-                });
-        }
-
-        // Tap popover with controls, size customization, cursor toggle, live demo, and recent activity
+        // 3. Tap Popover Menu
         if self.popover_open {
-            let win_w = 284.0;
-            let win_h = 395.0;
+            let win_w = 296.0;
+            let win_h = 465.0;
             let on_right_half = (pos.x + size * 0.5) > screen.center().x;
             let raw_x = if on_right_half {
                 pos.x - win_w - 10.0
             } else {
                 pos.x + size + 10.0
             };
-            let raw_y = pos.y - 20.0;
+            let raw_y = pos.y - 30.0;
             let pop_x = raw_x.clamp(screen.left() + 8.0, (screen.right() - win_w - 8.0).max(8.0));
             let pop_y = raw_y.clamp(min_y, (screen.bottom() - win_h - 12.0).max(min_y));
 
             let mut open = self.popover_open;
             egui::Window::new("AI 에이전트")
+                .order(egui::Order::Foreground)
                 .id(egui::Id::unique(("figcraft_ai_agent_popover", self.popover_open_seq)))
                 .open(&mut open)
                 .collapsible(false)
@@ -1016,7 +1437,7 @@ impl AgentBubbleState {
                             ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
                         ui.painter()
                             .circle_filled(dot_rect.center(), 4.5, state.accent_color());
-                        ui.strong(state.label_ko());
+                        ui.strong(format!("{} · {}", agent_name, state.label_ko()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let mcp_txt = if mcp_active { "MCP 대기" } else { "MCP 꺼짐" };
                             ui.small(mcp_txt);
@@ -1030,7 +1451,7 @@ impl AgentBubbleState {
                             .add(
                                 egui::Button::new(pause_lbl)
                                     .selected(self.paused)
-                                    .min_size(Vec2::new(84.0, 32.0)),
+                                    .min_size(Vec2::new(88.0, 32.0)),
                             )
                             .clicked()
                         {
@@ -1038,13 +1459,13 @@ impl AgentBubbleState {
                             self.preview_override = None;
                         }
                         if ui
-                            .add(egui::Button::new("실행취소").min_size(Vec2::new(84.0, 32.0)))
+                            .add(egui::Button::new("실행취소").min_size(Vec2::new(88.0, 32.0)))
                             .clicked()
                         {
                             actions.undo = true;
                         }
                         if ui
-                            .add(egui::Button::new("숨기기").min_size(Vec2::new(74.0, 32.0)))
+                            .add(egui::Button::new("숨기기").min_size(Vec2::new(76.0, 32.0)))
                             .clicked()
                         {
                             prefs.ai_bubble_visible = false;
@@ -1052,7 +1473,42 @@ impl AgentBubbleState {
                         }
                     });
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // AI Name selector (Auto + popular AI presets + custom)
+                    ui.strong("AI 이름 표시");
+                    ui.horizontal_wrapped(|ui| {
+                        for (lbl, val) in [
+                            ("자동", ""),
+                            ("Gemini", "Gemini"),
+                            ("Claude", "Claude"),
+                            ("ChatGPT", "ChatGPT"),
+                            ("Muse", "Muse"),
+                            ("Grok", "Grok"),
+                            ("DeepSeek", "DeepSeek"),
+                        ] {
+                            let sel = prefs.ai_agent_name.trim() == val;
+                            if ui.add(egui::Button::new(lbl).selected(sel)).clicked() {
+                                prefs.ai_agent_name = val.to_owned();
+                                actions.prefs_dirty = true;
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.small("직접 입력:");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut prefs.ai_agent_name)
+                                .hint_text("비우면 MCP 자동 인식")
+                                .desired_width(180.0),
+                        );
+                        if resp.changed() {
+                            actions.prefs_dirty = true;
+                        }
+                    });
+
+                    ui.add_space(6.0);
                     ui.separator();
                     ui.add_space(4.0);
 
@@ -1061,7 +1517,7 @@ impl AgentBubbleState {
                         for (lbl, val) in [("작게", 44.0_f32), ("보통", 56.0), ("크게", 72.0), ("특대", 88.0)] {
                             let sel = (prefs.ai_bubble_size - val).abs() < 2.0;
                             if ui
-                                .add(egui::Button::new(lbl).selected(sel).min_size(Vec2::new(58.0, 26.0)))
+                                .add(egui::Button::new(lbl).selected(sel).min_size(Vec2::new(60.0, 26.0)))
                                 .clicked()
                             {
                                 prefs.ai_bubble_size = val;
@@ -1081,7 +1537,7 @@ impl AgentBubbleState {
                     }
 
                     if ui
-                        .checkbox(&mut prefs.ai_bubble_show_speech, "실시간 작업 말풍선 표시")
+                        .checkbox(&mut prefs.ai_bubble_show_speech, "하단 작업 상태 카드 표시")
                         .changed()
                     {
                         actions.prefs_dirty = true;
@@ -1101,7 +1557,7 @@ impl AgentBubbleState {
                         ui.small("상태·커서 미리보기");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
-                                .add(egui::Button::new("커서 데모 체험").min_size(Vec2::new(98.0, 24.0)))
+                                .add(egui::Button::new("커서 데모 체험").min_size(Vec2::new(104.0, 24.0)))
                                 .clicked()
                             {
                                 self.start_cursor_demo();
@@ -1109,20 +1565,21 @@ impl AgentBubbleState {
                         });
                     });
                     ui.horizontal(|ui| {
-                        for (lbl, st, sample) in [
-                            ("평상시", AgentVisualState::Idle, ""),
-                            ("작업중", AgentVisualState::Working, "도형·프레임 그리는 중"),
-                            ("완료", AgentVisualState::Done, "완료 · 3개 작업"),
-                            ("정지", AgentVisualState::Paused, ""),
+                        for (lbl, st, cat, sample) in [
+                            ("평상시", AgentVisualState::Idle, ActionCategory::Generic, ""),
+                            ("작업중", AgentVisualState::Working, ActionCategory::Frame, "프레임 만드는 중"),
+                            ("완료", AgentVisualState::Done, ActionCategory::Done, "완료 · 4개 작업"),
+                            ("정지", AgentVisualState::Paused, ActionCategory::Paused, ""),
                         ] {
                             if ui
-                                .add(egui::Button::new(lbl).min_size(Vec2::new(58.0, 26.0)))
+                                .add(egui::Button::new(lbl).min_size(Vec2::new(60.0, 26.0)))
                                 .clicked()
                             {
                                 self.preview_override =
                                     Some((st, Instant::now() + Duration::from_secs(4)));
                                 if st == AgentVisualState::Working {
                                     self.current_task_text = sample.to_owned();
+                                    self.current_category = cat;
                                 } else if st == AgentVisualState::Done {
                                     self.last_done_text = sample.to_owned();
                                     self.done_entered_at = Some(Instant::now());
@@ -1141,20 +1598,15 @@ impl AgentBubbleState {
                     } else {
                         for entry in self.logs.iter().take(5) {
                             ui.horizontal(|ui| {
-                                let col = if entry.ok {
-                                    Color32::from_rgb(72, 224, 134)
-                                } else {
-                                    Color32::from_rgb(240, 100, 100)
-                                };
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(7.0), Sense::hover());
-                                ui.painter().circle_filled(r.center(), 3.2, col);
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                                entry.category.paint_icon(ui.painter(), r.center());
                                 let secs = entry.at.elapsed().as_secs();
                                 let ago = if secs < 60 {
                                     format!("{secs}초 전")
                                 } else {
                                     format!("{}분 전", secs / 60)
                                 };
-                                ui.small(format!("{} ({ago})", entry.raw_cmd));
+                                ui.small(format!("{} ({ago})", entry.summary));
                             });
                         }
                     }
