@@ -1,5 +1,6 @@
 //! Main `eframe::App` wrapper hosting the real `figcraft_ui_egui::FigApp` inside Android `GameActivity` (V8 · egui 0.37).
 
+use crate::agent_bubble::AgentBubbleState;
 use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig};
 use crate::platform;
 use crate::protocol::{ActivityEvent, StylusAction};
@@ -202,6 +203,7 @@ pub struct FigcraftAndroidShell {
     game_ime_last_composing: String,
     last_recovery_stamps: Vec<(u64, Vec<u64>)>,
     last_recovery_save: std::time::Instant,
+    agent_bubble: AgentBubbleState,
 }
 
 impl FigcraftAndroidShell {
@@ -344,6 +346,7 @@ impl FigcraftAndroidShell {
             game_ime_last_composing: String::new(),
             last_recovery_stamps: Vec::new(),
             last_recovery_save: std::time::Instant::now(),
+            agent_bubble: AgentBubbleState::default(),
         }
     }
 
@@ -707,6 +710,19 @@ impl FigcraftAndroidShell {
                 {
                     self.tablet_input.show_shortcut_pad = !self.tablet_input.show_shortcut_pad;
                     self.prefs.show_shortcut_pad = self.tablet_input.show_shortcut_pad;
+                    self.services.save_prefs(&self.prefs);
+                }
+            }
+            ToolbarButtonId::AiAgent => {
+                if ui
+                    .add(
+                        egui::Button::new("AI 에이전트")
+                            .selected(self.prefs.ai_bubble_visible)
+                            .min_size(egui::vec2(78.0, h)),
+                    )
+                    .clicked()
+                {
+                    self.prefs.ai_bubble_visible = !self.prefs.ai_bubble_visible;
                     self.services.save_prefs(&self.prefs);
                 }
             }
@@ -1635,21 +1651,38 @@ impl FigcraftAndroidShell {
                 if name == "engine.execute" {
                     let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
                     let cmd_params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+                    let canvas_rect = self.tablet_input.canvas_rect;
+                    if self.agent_bubble.paused {
+                        self.agent_bubble.record_activity_with_target(cmd, false, Some(&cmd_params), None, canvas_rect);
+                        return json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "error": { "code": -32001, "message": "AI agent is paused by user" }
+                        });
+                    }
                     match self.fig.session.execute(cmd, &cmd_params) {
-                        Ok(out) => json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": [{ "type": "text", "text": format!("{out:?}") }]
-                            }
-                        }),
-                        Err(err) => json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "error": { "code": -32000, "message": format!("{err}") }
-                        }),
+                        Ok(out) => {
+                            self.agent_bubble.record_activity_with_target(cmd, true, Some(&cmd_params), None, canvas_rect);
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": {
+                                    "content": [{ "type": "text", "text": format!("{out:?}") }]
+                                }
+                            })
+                        }
+                        Err(err) => {
+                            self.agent_bubble.record_activity_with_target(cmd, false, Some(&cmd_params), None, canvas_rect);
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "error": { "code": -32000, "message": format!("{err}") }
+                            })
+                        }
                     }
                 } else {
+                    let canvas_rect = self.tablet_input.canvas_rect;
+                    self.agent_bubble.record_activity_with_target("figcraft.status", true, None, None, canvas_rect);
                     json!({
                         "jsonrpc": "2.0",
                         "id": id,
@@ -1691,7 +1724,7 @@ impl FigcraftAndroidShell {
         let (doc, versions, branches) = recovery_copy(&self.fig.session, doc_state);
         if let Ok(bytes) = figcraft_format::save_bytes_with_history(&doc, None, &versions, &branches) {
             if std::fs::write(&local_fig, bytes).is_ok() {
-                self.services.drive_upload_canvas(&file_name, &local_fig.to_string_lossy(), "");
+                self.services.drive_upload_canvas(doc_state.uid, &file_name, &local_fig.to_string_lossy(), "");
             }
         }
     }
@@ -1811,6 +1844,7 @@ impl FigcraftAndroidShell {
         let mut do_rename = false;
         let mut prefs_changed = false;
         let mut open_req: Option<(String, String)> = None;
+        let mut delete_req: Option<(String, String)> = None;
 
         let drive_pos = Self::clamped_popup_pos(ctx, self.drive_window_anchor, 540.0, 500.0);
         egui::Window::new("Google Drive (FigCraft 폴더)")
@@ -1863,6 +1897,8 @@ impl FigcraftAndroidShell {
                             ui.label("3. 클라이언트 → 만들기 → '데스크톱 앱' 선택 (AI 에이전트 체크 안 함) → JSON 다운로드.");
                             ui.label("4. 위 'JSON 파일 불러오기'로 받은 파일을 선택하면 ID/비밀번호가 자동 입력됩니다.");
                             ui.label("5. 'Google 로그인'을 눌러 브라우저에서 승인하면 FigCraft 폴더가 자동 생성·동기화됩니다.");
+                            ui.label("   · 403 access_denied 오류 시: 2번 테스트 사용자에 로그인 이메일이 등록되었는지 확인하세요.");
+                            ui.label("   · '확인하지 않은 앱' 화면이 뜨면: 왼쪽 아래 '고급' → 'FigCraft Mobile(으)로 이동'을 누르세요.");
                         });
                 }
 
@@ -1907,9 +1943,14 @@ impl FigcraftAndroidShell {
                                             let short_date: String = item.modified_time.chars().take(10).collect();
                                             ui.label(egui::RichText::new(short_date).size(11.0).weak());
                                         }
-                                        if ui.button("캔버스 열기").clicked() {
-                                            open_req = Some((item.file_id.clone(), item.name.clone()));
-                                        }
+                                        ui.horizontal(|ui| {
+                                            if ui.button("열기").clicked() {
+                                                open_req = Some((item.file_id.clone(), item.name.clone()));
+                                            }
+                                            if ui.button("삭제").clicked() {
+                                                delete_req = Some((item.file_id.clone(), item.name.clone()));
+                                            }
+                                        });
                                     });
                             }
                         });
@@ -1954,6 +1995,9 @@ impl FigcraftAndroidShell {
             self.services.drive_open_file(&fid, &name);
             self.drive_window_open = false;
             self.fig.ui.home = false;
+        }
+        if let Some((fid, name)) = delete_req {
+            self.services.drive_delete_file(&fid, &name);
         }
     }
 
@@ -2182,6 +2226,10 @@ impl eframe::App for FigcraftAndroidShell {
                 });
         }
 
+        if self.fig.ui.home {
+            self.show_home_drive_strip(ui);
+        }
+
         self.tablet_input.canvas_rect = Some(ui.available_rect_before_wrap());
 
         // Render the real FigCraft UI (toolbars, Layers, Design/Inspect panels, Canvas)
@@ -2227,8 +2275,18 @@ impl eframe::App for FigcraftAndroidShell {
         self.show_mouse_settings_window(&ctx);
         self.show_drive_window(&ctx);
         self.show_font_browser_window(&ctx);
-        if self.fig.ui.home {
-            self.show_home_drive_strip(ui);
+        let agent_actions = self.agent_bubble.show(
+            &ctx,
+            &mut self.prefs,
+            self.tablet_input.top_bar_bottom_pt,
+            self.tablet_input.canvas_rect,
+            self.mcp_server.is_some(),
+        );
+        if agent_actions.undo {
+            self.fig.run("edit.undo", json!({}));
+        }
+        if agent_actions.prefs_dirty {
+            self.services.save_prefs(&self.prefs);
         }
         self.tablet_input.paint_virtual_cursor(&ctx);
 
@@ -2237,6 +2295,7 @@ impl eframe::App for FigcraftAndroidShell {
             || !self.pending_egui_events.is_empty()
             || self.game_ime_active
             || self.mcp_server.is_some()
+            || self.agent_bubble.needs_repaint()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
         }
