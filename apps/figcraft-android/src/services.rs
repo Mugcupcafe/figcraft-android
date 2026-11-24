@@ -31,6 +31,7 @@ pub enum ToolbarButtonId {
     RenameCanvas,
     CopyToken,
     Pad,
+    AiAgent,
 }
 
 impl ToolbarButtonId {
@@ -57,6 +58,7 @@ impl ToolbarButtonId {
         Self::RenameCanvas,
         Self::CopyToken,
         Self::Pad,
+        Self::AiAgent,
     ];
 
     pub fn default_bar() -> Vec<Self> {
@@ -105,6 +107,7 @@ impl ToolbarButtonId {
             Self::RenameCanvas => "이름변경",
             Self::CopyToken => "토큰 복사",
             Self::Pad => "단축키",
+            Self::AiAgent => "AI 에이전트",
         }
     }
 }
@@ -131,6 +134,14 @@ fn default_mouse_border_width() -> f32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_ai_bubble_size() -> f32 {
+    56.0
+}
+
+fn default_neg_one() -> f32 {
+    -1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +176,18 @@ pub struct AndroidShellPrefs {
     pub drive_button_migrated: bool,
     #[serde(default)]
     pub text_rename_migrated: bool,
+    #[serde(default = "default_true")]
+    pub ai_bubble_visible: bool,
+    #[serde(default = "default_ai_bubble_size")]
+    pub ai_bubble_size: f32,
+    #[serde(default = "default_neg_one")]
+    pub ai_bubble_pos_x: f32,
+    #[serde(default = "default_neg_one")]
+    pub ai_bubble_pos_y: f32,
+    #[serde(default = "default_true")]
+    pub ai_bubble_show_speech: bool,
+    #[serde(default = "default_true")]
+    pub ai_cursor_enabled: bool,
 }
 
 impl Default for AndroidShellPrefs {
@@ -186,6 +209,12 @@ impl Default for AndroidShellPrefs {
             drive_auto_sync: true,
             drive_button_migrated: true,
             text_rename_migrated: true,
+            ai_bubble_visible: true,
+            ai_bubble_size: default_ai_bubble_size(),
+            ai_bubble_pos_x: -1.0,
+            ai_bubble_pos_y: -1.0,
+            ai_bubble_show_speech: true,
+            ai_cursor_enabled: true,
         }
     }
 }
@@ -228,6 +257,7 @@ impl AndroidServices {
         prefs.toolbar_buttons.retain(|b| !prefs.pinned_toolbar_buttons.contains(b));
         prefs.mouse_cursor_scale = prefs.mouse_cursor_scale.clamp(0.6, 2.0);
         prefs.mouse_grip_distance = prefs.mouse_grip_distance.clamp(24.0, 200.0);
+        prefs.ai_bubble_size = prefs.ai_bubble_size.clamp(36.0, 96.0);
         prefs.mouse_grip_offset_x = prefs.mouse_grip_offset_x.clamp(-200.0, 200.0);
         prefs.mouse_grip_offset_y = prefs.mouse_grip_offset_y.clamp(-200.0, 200.0);
         prefs.mouse_grip_opacity = prefs.mouse_grip_opacity.clamp(0.05, 1.0);
@@ -442,9 +472,14 @@ impl AndroidServices {
         let _ = platform::call_activity("drive_sync_now", "");
     }
 
-    pub fn drive_upload_canvas(&self, name: &str, fig_path: &str, thumb_path: &str) {
-        let arg = format!("{name}{SEP}{fig_path}{SEP}{thumb_path}");
+    pub fn drive_upload_canvas(&self, doc_uid: u64, name: &str, fig_path: &str, thumb_path: &str) {
+        let arg = format!("{doc_uid}{SEP}{name}{SEP}{fig_path}{SEP}{thumb_path}");
         let _ = platform::call_activity("drive_upload", &arg);
+    }
+
+    pub fn drive_delete_file(&self, file_id: &str, name: &str) {
+        let arg = format!("{file_id}{SEP}{name}");
+        let _ = platform::call_activity("drive_delete", &arg);
     }
 
     pub fn drive_open_file(&self, file_id: &str, name: &str) {
