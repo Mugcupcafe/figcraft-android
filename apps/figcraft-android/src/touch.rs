@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 const PALM_REJECTION_WINDOW: Duration = Duration::from_millis(450);
 const LONG_PRESS_DURATION: Duration = Duration::from_millis(550);
 const LONG_PRESS_SLOP_PT: f32 = 12.0;
-const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(320);
-const DOUBLE_TAP_SNAP_PT: f32 = 24.0;
+const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(420);
+const DOUBLE_TAP_SNAP_PT: f32 = 36.0;
 const MOUSE_TAP_SLOP_PT: f32 = 7.0;
 const MOUSE_TAP_MAX_DURATION: Duration = Duration::from_millis(260);
 const MOUSE_DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(340);
@@ -102,6 +102,7 @@ pub struct TabletInputState {
     long_press: Option<LongPressCandidate>,
     suppressed_touch_id: Option<egui::TouchId>,
     last_tap: Option<(Instant, egui::Pos2)>,
+    double_tap_snap: Option<(egui::TouchId, egui::Pos2)>,
     last_sent_modifiers: egui::Modifiers,
     shortcut_pad_id: egui::Id,
     mouse_track: Option<MouseTouchTrack>,
@@ -148,6 +149,7 @@ impl Default for TabletInputState {
             long_press: None,
             suppressed_touch_id: None,
             last_tap: None,
+            double_tap_snap: None,
             last_sent_modifiers: egui::Modifiers::NONE,
             shortcut_pad_id: egui::Id::unique("figcraft_tablet_shortcut_pad"),
             mouse_track: None,
@@ -338,7 +340,12 @@ impl TabletInputState {
                                         && prev_pos.distance(*pos) <= DOUBLE_TAP_SNAP_PT
                                     {
                                         snap_double_tap = Some(prev_pos);
+                                        self.double_tap_snap = Some((*id, prev_pos));
+                                    } else {
+                                        self.double_tap_snap = None;
                                     }
+                                } else {
+                                    self.double_tap_snap = None;
                                 }
                                 if self.long_press_enabled {
                                     self.long_press = Some(LongPressCandidate {
@@ -392,23 +399,33 @@ impl TabletInputState {
                         if self.long_press.is_some_and(|lp| lp.touch_id == *id) {
                             self.long_press = None;
                         }
+                        if self.double_tap_snap.is_some_and(|(tid, _)| tid == *id) {
+                            snap_double_tap = self.double_tap_snap.take().map(|(_, p)| p);
+                        }
                     }
                 }
             }
         }
 
-        if let Some(snap_pos) = snap_double_tap {
+        let active_snap = snap_double_tap.or_else(|| self.double_tap_snap.map(|(_, p)| p));
+        if let Some(snap_pos) = active_snap {
             for ev in &mut raw_input.events {
-                if let egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    ..
-                } = ev
-                {
-                    *pos = snap_pos;
+                match ev {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        ..
+                    } => *pos = snap_pos,
+                    egui::Event::PointerMoved(pos) => *pos = snap_pos,
+                    _ => {}
                 }
             }
+        }
+        // Keep egui's double-click detector alive between tap 1 and tap 2 (PointerGone resets it)
+        if !self.mouse_cursor_mode
+            && self.last_tap.is_some_and(|(t, _)| t.elapsed() <= DOUBLE_TAP_WINDOW)
+        {
+            raw_input.events.retain(|ev| !matches!(ev, egui::Event::PointerGone));
         }
 
         if suppress_this_frame {
