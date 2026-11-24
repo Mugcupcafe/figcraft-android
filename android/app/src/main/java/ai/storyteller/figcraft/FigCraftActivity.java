@@ -174,7 +174,7 @@ public class FigCraftActivity extends GameActivity {
         });
         driveSyncManager.emitInitialState();
         tunnelManager = new TunnelManager(this, (state, url, msg) -> {
-            enqueueEvent("tunnel_state" + SEP + state + SEP + (url == null ? "" : url) + SEP + (msg == null ? "" : msg));
+            enqueueControl("tunnel_state" + SEP + state + SEP + (url == null ? "" : url) + SEP + (msg == null ? "" : msg));
         });
         // GameActivity native GameTextInput handles direct IME without focus conflicts
         View rootView = findViewById(android.R.id.content);
