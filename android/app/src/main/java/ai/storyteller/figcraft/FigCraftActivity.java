@@ -1133,6 +1133,18 @@ public class FigCraftActivity extends GameActivity {
                  OutputStream out = new FileOutputStream(dst)) {
                 copyStream(in, out);
             }
+            File fontsDir = new File(getFilesDir(), "fonts");
+            if (!fontsDir.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                fontsDir.mkdirs();
+            }
+            File canvasFont = new File(fontsDir, "Pretendard-Medium.otf");
+            if (!canvasFont.exists() || canvasFont.length() < 10000) {
+                try (InputStream in = getAssets().open("ui_font.otf");
+                     OutputStream out = new FileOutputStream(canvasFont)) {
+                    copyStream(in, out);
+                }
+            }
         } catch (Exception ignored) {
         }
     }
