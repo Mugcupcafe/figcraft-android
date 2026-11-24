@@ -1620,7 +1620,11 @@ impl FigcraftAndroidShell {
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         let method = req.get("method").and_then(Value::as_str).unwrap_or("");
         match method {
-            "initialize" => json!({
+            "initialize" => {
+                if let Some(cname) = req.pointer("/params/clientInfo/name").and_then(Value::as_str) {
+                    self.agent_bubble.set_detected_client_name(cname);
+                }
+                json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
@@ -1628,7 +1632,8 @@ impl FigcraftAndroidShell {
                     "serverInfo": { "name": "figcraft-android-mcp", "version": "0.18.1" },
                     "capabilities": { "tools": {} }
                 }
-            }),
+            })
+            }
             "tools/list" => json!({
                 "jsonrpc": "2.0",
                 "id": id,
