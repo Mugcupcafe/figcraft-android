@@ -78,15 +78,24 @@ workflows:
                   break
           for p in sorted(Path("crates/text/src").rglob("*.rs")):
               s = p.read_text(encoding="utf-8")
-              orig = s
-              if '"/usr/share/fonts"' in s:
-                  if 'any(target_os = "linux", target_os = "android")' not in s:
-                      s = s.replace('target_os = "linux"', 'any(target_os = "linux", target_os = "android")')
-                  if '"/system/fonts"' not in s:
-                      s = s.replace('"/usr/share/fonts"', '"/data/user/0/ai.storyteller.figcraft/files/fonts", "/system/fonts", "/product/fonts", "/usr/share/fonts"')
-              if s != orig:
-                  p.write_text(s, encoding="utf-8")
-                  print(f"Enabled Android system & user font scan in {p}")
+              idx = s.find("fn system_font_dirs(")
+              if idx != -1 and "ai.storyteller.figcraft/files/fonts" not in s:
+                  brace = s.find("{", idx)
+                  if brace != -1:
+                      inject = '''
+              #[cfg(target_os = "android")]
+              {
+                  return vec![
+                      std::path::PathBuf::from("/data/user/0/ai.storyteller.figcraft/files/fonts"),
+                      std::path::PathBuf::from("/data/data/ai.storyteller.figcraft/files/fonts"),
+                      std::path::PathBuf::from("/system/fonts"),
+                      std::path::PathBuf::from("/product/fonts"),
+                  ];
+              }
+          '''
+                      s = s[:brace + 1] + inject + s[brace + 1:]
+                      p.write_text(s, encoding="utf-8")
+                      print(f"Injected Android system_font_dirs() into {p}")
           for p in sorted(Path("crates/ui-egui/src").rglob("*.rs")):
               s = p.read_text(encoding="utf-8")
               if any(k in s for k in ("Search fonts", "font_search", "font_picker", "FontPicker")):
