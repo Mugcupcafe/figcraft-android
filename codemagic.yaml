@@ -79,9 +79,21 @@ workflows:
           for p in sorted(Path("crates/text/src").rglob("*.rs")):
               s = p.read_text(encoding="utf-8")
               if '"/usr/share/fonts"' in s and '"/system/fonts"' not in s:
-                  s = s.replace('"/usr/share/fonts"', '"/usr/share/fonts", "/system/fonts", "/product/fonts"')
+                  s = s.replace('"/usr/share/fonts"', '"/usr/share/fonts", "/system/fonts", "/product/fonts", "/data/user/0/ai.storyteller.figcraft/files/fonts"')
                   p.write_text(s, encoding="utf-8")
-                  print(f"Added Android /system/fonts to {p}")
+                  print(f"Added Android system & user font dirs to {p}")
+          for p in sorted(Path("crates/ui-egui/src").rglob("*.rs")):
+              s = p.read_text(encoding="utf-8")
+              if "Search fonts" in s or "font_search" in s:
+                  lines = s.splitlines(keepends=True)
+                  changed_f = False
+                  for i, line in enumerate(lines):
+                      if "request_focus" in line and ("font" in line.lower() or (i > 0 and "font" in lines[i-1].lower()) or (i + 1 < len(lines) and "font" in lines[i+1].lower())):
+                          lines[i] = "// [android] disabled auto-keyboard on font picker open: " + line
+                          changed_f = True
+                  if changed_f:
+                      p.write_text("".join(lines), encoding="utf-8")
+                      print(f"Disabled font picker auto-focus in {p}")
           EOF
 
       - name: Run host unit tests (protocol, touch, mcp_http)
