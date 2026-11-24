@@ -12,7 +12,7 @@ android {
         targetSdk 35
         def cmBuild = (System.getenv("BUILD_NUMBER") ?: "1").toInteger()
         versionCode 180 + cmBuild
-        versionName "0.18.1-android-v24-hotfix1." + cmBuild
+        versionName "0.18.1-android-v26." + cmBuild
 
         ndk {
             abiFilters "arm64-v8a"
