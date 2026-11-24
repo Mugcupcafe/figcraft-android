@@ -6,6 +6,7 @@
 
 pub mod agent_bubble;
 pub mod mcp_http;
+pub mod ngrok_tunnel;
 pub mod platform;
 pub mod protocol;
 pub mod services;
