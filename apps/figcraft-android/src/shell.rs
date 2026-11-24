@@ -13,7 +13,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
-#[derive(Debug, Clone, serde::Deserialize, Default)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontCategory {
     All,
@@ -55,6 +54,7 @@ struct FontCatalogEntry {
     source_tag: &'static str,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, Default)]
 struct DriveCanvasItem {
     #[serde(default)]
     file_id: String,
@@ -289,6 +289,10 @@ impl FigcraftAndroidShell {
         let mut tablet_input = TabletInputState::default();
         tablet_input.mouse_cursor_scale = prefs.mouse_cursor_scale;
         tablet_input.mouse_grip_distance = prefs.mouse_grip_distance;
+        tablet_input.mouse_grip_offset_x = prefs.mouse_grip_offset_x;
+        tablet_input.mouse_grip_offset_y = prefs.mouse_grip_offset_y;
+        tablet_input.mouse_grip_opacity = prefs.mouse_grip_opacity;
+        tablet_input.mouse_border_width = prefs.mouse_border_width;
 
         Self {
             fig,
@@ -1068,7 +1072,7 @@ impl FigcraftAndroidShell {
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(320.0)
+            .default_width(350.0)
             .show(ctx, |ui| {
                 ui.label("마우스 커서 크기");
                 if ui
@@ -1082,26 +1086,78 @@ impl FigcraftAndroidShell {
                     self.tablet_input.mouse_cursor_scale = self.prefs.mouse_cursor_scale;
                     changed = true;
                 }
-                ui.add_space(8.0);
-                ui.label("커서 ↔ 우하단 조작 원 간격");
+                ui.add_space(6.0);
+
+                ui.label("마우스 ↔ 원 링 X 간격");
                 if ui
                     .add(
-                        egui::Slider::new(&mut self.prefs.mouse_grip_distance, 24.0..=120.0)
+                        egui::Slider::new(&mut self.prefs.mouse_grip_offset_x, -200.0..=200.0)
                             .suffix(" pt")
                             .fixed_decimals(0),
                     )
                     .changed()
                 {
-                    self.tablet_input.mouse_grip_distance = self.prefs.mouse_grip_distance;
+                    self.tablet_input.mouse_grip_offset_x = self.prefs.mouse_grip_offset_x;
+                    changed = true;
+                }
+                ui.add_space(4.0);
+
+                ui.label("마우스 ↔ 원 링 Y 간격");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.prefs.mouse_grip_offset_y, -200.0..=200.0)
+                            .suffix(" pt")
+                            .fixed_decimals(0),
+                    )
+                    .changed()
+                {
+                    self.tablet_input.mouse_grip_offset_y = self.prefs.mouse_grip_offset_y;
+                    changed = true;
+                }
+                ui.add_space(6.0);
+
+                ui.label("원 링 투명도 (원 링에만 적용)");
+                let mut opacity_pct = (self.prefs.mouse_grip_opacity * 100.0).round();
+                if ui
+                    .add(
+                        egui::Slider::new(&mut opacity_pct, 5.0..=100.0)
+                            .suffix("%")
+                            .fixed_decimals(0),
+                    )
+                    .changed()
+                {
+                    self.prefs.mouse_grip_opacity = (opacity_pct / 100.0).clamp(0.05, 1.0);
+                    self.tablet_input.mouse_grip_opacity = self.prefs.mouse_grip_opacity;
+                    changed = true;
+                }
+                ui.add_space(6.0);
+
+                ui.label("테두리 굵기 (마우스 · 원 링)");
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.prefs.mouse_border_width, 0.5..=5.0)
+                            .suffix(" pt")
+                            .fixed_decimals(1),
+                    )
+                    .changed()
+                {
+                    self.tablet_input.mouse_border_width = self.prefs.mouse_border_width;
                     changed = true;
                 }
                 ui.add_space(10.0);
+
                 ui.horizontal(|ui| {
                     if ui.button("기본값 복원").clicked() {
                         self.prefs.mouse_cursor_scale = 1.0;
-                        self.prefs.mouse_grip_distance = 52.0;
+                        self.prefs.mouse_grip_offset_x = 56.0;
+                        self.prefs.mouse_grip_offset_y = 56.0;
+                        self.prefs.mouse_grip_opacity = 0.45;
+                        self.prefs.mouse_border_width = 2.0;
                         self.tablet_input.mouse_cursor_scale = 1.0;
-                        self.tablet_input.mouse_grip_distance = 52.0;
+                        self.tablet_input.mouse_grip_offset_x = 56.0;
+                        self.tablet_input.mouse_grip_offset_y = 56.0;
+                        self.tablet_input.mouse_grip_opacity = 0.45;
+                        self.tablet_input.mouse_border_width = 2.0;
                         changed = true;
                     }
                 });
