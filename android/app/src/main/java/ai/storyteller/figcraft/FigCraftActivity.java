@@ -27,6 +27,9 @@ import android.view.View;
 import android.text.Editable;
 import android.text.InputType;
 import android.view.KeyEvent;
+import android.app.AlertDialog;
+import android.view.WindowManager;
+import android.widget.EditText;
 import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
@@ -73,6 +76,7 @@ public class FigCraftActivity extends GameActivity {
     private static final int REQ_PICK_FONTS_DIR = 1004;
     private static final int REQ_PICK_IMAGE = 1005;
     private static final int REQ_PICK_UI_FONT = 1006;
+    private static final int REQ_PICK_DRIVE_JSON = 1007;
     private static final long PALM_REJECTION_MS = 450L;
     private static final int MAX_STYLUS_QUEUE = 64;
     private static final int MAX_CLIPBOARD_TEXT_CHARS = 2 * 1024 * 1024;
@@ -161,9 +165,14 @@ public class FigCraftActivity extends GameActivity {
             public void onFileReadyToOpen(String localPath, String displayName) {
                 enqueueControl("file_opened" + SEP + localPath + SEP + displayName);
             }
+
+            @Override
+            public void onCredentialsImported(String clientId, String clientSecret) {
+                enqueueControl("drive_creds" + SEP + clientId + SEP + clientSecret);
+            }
         });
         driveSyncManager.emitInitialState();
-        setupImeBridgeView();
+        // GameActivity native GameTextInput handles direct IME without focus conflicts
         View rootView = findViewById(android.R.id.content);
         if (rootView == null && getWindow() != null) {
             rootView = getWindow().getDecorView();
@@ -501,8 +510,26 @@ public class FigCraftActivity extends GameActivity {
                     FigCraftApp.reportNativeError(this, arg);
                     return "ok";
                 }
+                case "pick_drive_json": {
+                    runOnUiThread(() -> {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                            intent.addCategory(Intent.CATEGORY_OPENABLE);
+                            intent.setType("*/*");
+                            intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/json", "text/plain", "*/*"});
+                            startActivityForResult(intent, REQ_PICK_DRIVE_JSON);
+                        } catch (Exception ignored) {
+                        }
+                    });
+                    return "ok";
+                }
                 case "drive_sign_in": {
-                    if (driveSyncManager != null) driveSyncManager.startSignIn(arg);
+                    if (driveSyncManager != null) {
+                        String[] parts = arg.split(SEP, -1);
+                        String cid = parts.length >= 1 ? parts[0] : "";
+                        String csec = parts.length >= 2 ? parts[1] : "";
+                        driveSyncManager.startSignIn(cid, csec);
+                    }
                     return "ok";
                 }
                 case "drive_sign_out": {
@@ -534,6 +561,14 @@ public class FigCraftActivity extends GameActivity {
                 }
                 case "drive_emit_state": {
                     if (driveSyncManager != null) driveSyncManager.emitInitialState();
+                    return "ok";
+                }
+                case "prompt_text_input": {
+                    runOnUiThread(() -> showNativeTextInputDialog(arg));
+                    return "ok";
+                }
+                case "prompt_rename_canvas": {
+                    runOnUiThread(() -> showNativeRenameCanvasDialog(arg));
                     return "ok";
                 }
                 default:
@@ -697,6 +732,76 @@ public class FigCraftActivity extends GameActivity {
             for (int i = 0; i < vg.getChildCount(); i++) {
                 disableSurfaceViewFocus(vg.getChildAt(i));
             }
+        }
+    }
+
+    private void showNativeTextInputDialog(String initialText) {
+        try {
+            EditText input = new EditText(this);
+            input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+            input.setMinLines(2);
+            input.setMaxLines(6);
+            input.setHint("한글, 영문, 숫자를 입력하세요");
+            if (initialText != null && !initialText.isEmpty()) {
+                input.setText(initialText);
+                input.setSelection(initialText.length());
+            }
+            int pad = (int) (18 * getResources().getDisplayMetrics().density);
+            android.widget.FrameLayout container = new android.widget.FrameLayout(this);
+            container.setPadding(pad, pad / 2, pad, 0);
+            container.addView(input);
+
+            AlertDialog dlg = new AlertDialog.Builder(this)
+                    .setTitle("텍스트 입력 (캔버스 / 선택 칸)")
+                    .setView(container)
+                    .setPositiveButton("입력", (d, w) -> {
+                        String txt = input.getText() != null ? input.getText().toString() : "";
+                        if (!txt.isEmpty()) {
+                            enqueueControl("native_text" + SEP + txt);
+                        }
+                    })
+                    .setNegativeButton("취소", null)
+                    .create();
+            if (dlg.getWindow() != null) {
+                dlg.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+            }
+            dlg.show();
+            input.requestFocus();
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void showNativeRenameCanvasDialog(String currentName) {
+        try {
+            EditText input = new EditText(this);
+            input.setInputType(InputType.TYPE_CLASS_TEXT);
+            input.setSingleLine(true);
+            input.setHint("캔버스 이름");
+            String init = (currentName != null && !currentName.isEmpty()) ? currentName : "Untitled";
+            input.setText(init);
+            input.selectAll();
+            int pad = (int) (18 * getResources().getDisplayMetrics().density);
+            android.widget.FrameLayout container = new android.widget.FrameLayout(this);
+            container.setPadding(pad, pad / 2, pad, 0);
+            container.addView(input);
+
+            AlertDialog dlg = new AlertDialog.Builder(this)
+                    .setTitle("캔버스 이름 변경")
+                    .setView(container)
+                    .setPositiveButton("변경", (d, w) -> {
+                        String txt = input.getText() != null ? input.getText().toString().trim() : "";
+                        if (!txt.isEmpty()) {
+                            enqueueControl("rename_canvas" + SEP + txt);
+                        }
+                    })
+                    .setNegativeButton("취소", null)
+                    .create();
+            if (dlg.getWindow() != null) {
+                dlg.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+            }
+            dlg.show();
+            input.requestFocus();
+        } catch (Exception ignored) {
         }
     }
 
@@ -993,6 +1098,16 @@ public class FigCraftActivity extends GameActivity {
             new Thread(() -> {
                 int count = mirrorFontTreeToPrivateDir(uri);
                 enqueueControl("fonts_synced" + SEP + count);
+            }).start();
+        } else if (requestCode == REQ_PICK_DRIVE_JSON) {
+            new Thread(() -> {
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (driveSyncManager != null) {
+                        driveSyncManager.importCredentialsJson(in);
+                    }
+                } catch (Exception e) {
+                    enqueueControl("drive_status" + SEP + "JSON 읽기 오류: " + e.getMessage());
+                }
             }).start();
         } else if (requestCode == REQ_PICK_UI_FONT) {
             String displayName = queryDisplayName(uri);
