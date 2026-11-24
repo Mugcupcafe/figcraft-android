@@ -543,9 +543,18 @@ public class FigCraftActivity extends GameActivity {
                 case "drive_upload": {
                     if (driveSyncManager != null) {
                         String[] parts = arg.split(SEP, -1);
+                        if (parts.length >= 3) {
+                            String thumb = parts.length >= 4 ? parts[3] : "";
+                            driveSyncManager.uploadCanvasAsync(parts[0], parts[1], parts[2], thumb);
+                        }
+                    }
+                    return "ok";
+                }
+                case "drive_delete": {
+                    if (driveSyncManager != null) {
+                        String[] parts = arg.split(SEP, -1);
                         if (parts.length >= 2) {
-                            String thumb = parts.length >= 3 ? parts[2] : "";
-                            driveSyncManager.uploadCanvasAsync(parts[0], parts[1], thumb);
+                            driveSyncManager.deleteDriveFileAsync(parts[0], parts[1]);
                         }
                     }
                     return "ok";
