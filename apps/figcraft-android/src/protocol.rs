@@ -63,6 +63,7 @@ pub enum ActivityEvent {
     DriveCreds { client_id: String, client_secret: String },
     NativeText(String),
     RenameCanvas(String),
+    TunnelState { state: String, url: String, message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +173,11 @@ impl ActivityEvent {
             "drive_creds" => Some(Self::DriveCreds {
                 client_id: parts.next()?.to_owned(),
                 client_secret: parts.next().unwrap_or("").to_owned(),
+            }),
+            "tunnel_state" => Some(Self::TunnelState {
+                state: parts.next().unwrap_or("stopped").to_owned(),
+                url: parts.next().unwrap_or("").to_owned(),
+                message: parts.next().unwrap_or("").to_owned(),
             }),
             _ => None,
         }
