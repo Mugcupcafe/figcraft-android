@@ -414,6 +414,7 @@ pub struct AgentLogEntry {
 pub struct AgentBubbleActions {
     pub undo: bool,
     pub prefs_dirty: bool,
+    pub open_mcp_tunnel: bool,
 }
 
 struct AgentTextures {
@@ -1472,6 +1473,13 @@ impl AgentBubbleState {
                             actions.prefs_dirty = true;
                         }
                     });
+                    if ui
+                        .add(egui::Button::new("MCP · HTTPS 터널 설정 열기").min_size(Vec2::new(266.0, 28.0)))
+                        .clicked()
+                    {
+                        actions.open_mcp_tunnel = true;
+                        self.popover_open = false;
+                    }
 
                     ui.add_space(6.0);
                     ui.separator();
