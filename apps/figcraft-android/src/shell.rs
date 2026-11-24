@@ -48,6 +48,7 @@ impl FontCategory {
 #[derive(Debug, Clone)]
 struct FontCatalogEntry {
     family: String,
+    display_name: String,
     is_variable: bool,
     is_korean: bool,
     style: FontCategory,
@@ -293,6 +294,7 @@ impl FigcraftAndroidShell {
         tablet_input.mouse_grip_offset_y = prefs.mouse_grip_offset_y;
         tablet_input.mouse_grip_opacity = prefs.mouse_grip_opacity;
         tablet_input.mouse_border_width = prefs.mouse_border_width;
+        tablet_input.show_shortcut_pad = prefs.show_shortcut_pad;
 
         Self {
             fig,
@@ -703,6 +705,8 @@ impl FigcraftAndroidShell {
                     .clicked()
                 {
                     self.tablet_input.show_shortcut_pad = !self.tablet_input.show_shortcut_pad;
+                    self.prefs.show_shortcut_pad = self.tablet_input.show_shortcut_pad;
+                    self.services.save_prefs(&self.prefs);
                 }
             }
         }
@@ -883,14 +887,108 @@ impl FigcraftAndroidShell {
         buf[..n].windows(4).any(|w| w == b"fvar")
     }
 
-    fn classify_font_name(name: &str) -> (bool, FontCategory) {
-        let lower = name.to_lowercase();
-        let is_korean = lower.contains("kr")
+    /// Reads OpenType `name` table to extract Korean (0x0412) and English (0x0409) family names.
+    fn read_opentype_family_names(path: &std::path::Path) -> (Option<String>, Option<String>) {
+        let Ok(bytes) = std::fs::read(path) else { return (None, None); };
+        if bytes.len() < 12 {
+            return (None, None);
+        }
+        let sfnt_offset = if &bytes[0..4] == b"ttcf" && bytes.len() >= 16 {
+            u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize
+        } else {
+            0
+        };
+        if sfnt_offset + 12 > bytes.len() {
+            return (None, None);
+        }
+        let num_tables = u16::from_be_bytes([bytes[sfnt_offset + 4], bytes[sfnt_offset + 5]]) as usize;
+        let mut name_off = 0usize;
+        let mut name_len = 0usize;
+        for i in 0..num_tables {
+            let rec = sfnt_offset + 12 + i * 16;
+            if rec + 16 > bytes.len() {
+                break;
+            }
+            if &bytes[rec..rec + 4] == b"name" {
+                name_off = u32::from_be_bytes([bytes[rec + 8], bytes[rec + 9], bytes[rec + 10], bytes[rec + 11]]) as usize;
+                name_len = u32::from_be_bytes([bytes[rec + 12], bytes[rec + 13], bytes[rec + 14], bytes[rec + 15]]) as usize;
+                break;
+            }
+        }
+        if name_off == 0 || name_off + 6 > bytes.len() || name_off + name_len > bytes.len() {
+            return (None, None);
+        }
+        let count = u16::from_be_bytes([bytes[name_off + 2], bytes[name_off + 3]]) as usize;
+        let str_off = name_off + u16::from_be_bytes([bytes[name_off + 4], bytes[name_off + 5]]) as usize;
+        let mut ko_name: Option<String> = None;
+        let mut en_name: Option<String> = None;
+
+        for i in 0..count {
+            let r = name_off + 6 + i * 12;
+            if r + 12 > bytes.len() {
+                break;
+            }
+            let platform_id = u16::from_be_bytes([bytes[r], bytes[r + 1]]);
+            let encoding_id = u16::from_be_bytes([bytes[r + 2], bytes[r + 3]]);
+            let lang_id = u16::from_be_bytes([bytes[r + 4], bytes[r + 5]]);
+            let name_id = u16::from_be_bytes([bytes[r + 6], bytes[r + 7]]);
+            let len = u16::from_be_bytes([bytes[r + 8], bytes[r + 9]]) as usize;
+            let off = u16::from_be_bytes([bytes[r + 10], bytes[r + 11]]) as usize;
+            if name_id != 1 && name_id != 16 {
+                continue;
+            }
+            let start = str_off.saturating_add(off);
+            let end = start.saturating_add(len);
+            if end > bytes.len() || len == 0 {
+                continue;
+            }
+            if platform_id == 3 && (encoding_id == 1 || encoding_id == 10) && len % 2 == 0 {
+                let u16s: Vec<u16> = bytes[start..end]
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                if let Ok(decoded) = String::from_utf16(&u16s) {
+                    let trimmed = decoded.trim().to_owned();
+                    if !trimmed.is_empty() {
+                        if lang_id == 0x0412 && (ko_name.is_none() || name_id == 16) {
+                            ko_name = Some(trimmed);
+                        } else if lang_id == 0x0409 && (en_name.is_none() || name_id == 16) {
+                            en_name = Some(trimmed);
+                        }
+                    }
+                }
+            }
+        }
+        (ko_name, en_name)
+    }
+
+    fn korean_alias(family: &str) -> Option<&'static str> {
+        let l = family.to_lowercase();
+        if l.contains("pretendard") { Some("프리텐다드") }
+        else if l.contains("notosanscjk") || l.contains("notosanskr") { Some("노토 산스 한글") }
+        else if l.contains("notoserifcjk") || l.contains("notoserifkr") { Some("노토 세리프 한글") }
+        else if l.contains("nanumgothic") { Some("나눔고딕") }
+        else if l.contains("nanummyeongjo") { Some("나눔명조") }
+        else if l.contains("nanumsquare") { Some("나눔스퀘어") }
+        else if l.contains("maruburi") { Some("마루부리") }
+        else if l.contains("spoqa") { Some("스포카 한 산스") }
+        else if l.contains("gmarket") { Some("지마켓 산스") }
+        else if l.contains("roboto") { Some("로보토") }
+        else if l.contains("inter") { Some("인터") }
+        else { None }
+    }
+
+    fn classify_font_name(family: &str, display_name: &str) -> (bool, FontCategory) {
+        let lower = family.to_lowercase();
+        let has_hangul = display_name.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c))
+            || family.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c));
+        let is_korean = has_hangul
+            || lower.contains("kr")
             || lower.contains("cjk")
             || lower.contains("hangul")
+            || lower.contains("korean")
             || lower.contains("pretendard")
             || lower.contains("nanum")
-            || lower.contains("noto")
             || lower.contains("spoqa")
             || lower.contains("gmarket")
             || lower.contains("suit")
@@ -899,7 +997,7 @@ impl FigcraftAndroidShell {
             || lower.contains("gulim")
             || lower.contains("dotum")
             || lower.contains("malgun")
-            || name.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c));
+            || lower.contains("baemin");
         let style = if lower.contains("mono") || lower.contains("code") || lower.contains("console") || lower.contains("courier") {
             FontCategory::Mono
         } else if lower.contains("serif") || lower.contains("myeongjo") || lower.contains("batang") || lower.contains("maruburi") || lower.contains("georgia") || lower.contains("times") {
@@ -927,22 +1025,36 @@ impl FigcraftAndroidShell {
                 if stem.is_empty() {
                     continue;
                 }
-                let family = stem
+                let (ko_name, en_name) = Self::read_opentype_family_names(&path);
+                let fallback_fam = stem
                     .split('-')
                     .next()
                     .unwrap_or(stem)
                     .replace('_', " ")
                     .trim()
                     .to_owned();
+                let family = en_name.unwrap_or(fallback_fam);
                 if family.is_empty() || !seen.insert(family.to_lowercase()) {
                     continue;
                 }
+                let display_name = if let Some(ko) = ko_name {
+                    if ko.eq_ignore_ascii_case(&family) {
+                        ko
+                    } else {
+                        format!("{ko} ({family})")
+                    }
+                } else if let Some(alias) = Self::korean_alias(&family) {
+                    format!("{alias} ({family})")
+                } else {
+                    family.clone()
+                };
                 let is_variable = Self::is_variable_font_file(&path)
                     || stem.to_lowercase().contains("variable")
                     || stem.to_lowercase().contains("vf");
-                let (is_korean, style) = Self::classify_font_name(&family);
+                let (is_korean, style) = Self::classify_font_name(&family, &display_name);
                 entries.push(FontCatalogEntry {
                     family,
+                    display_name,
                     is_variable,
                     is_korean,
                     style,
@@ -959,10 +1071,13 @@ impl FigcraftAndroidShell {
         scan_dir(std::path::Path::new("/product/fonts"), "시스템");
 
         entries.sort_by(|a, b| {
-            b.is_korean
-                .cmp(&a.is_korean)
+            let a_user = a.source_tag == "사용자";
+            let b_user = b.source_tag == "사용자";
+            b_user
+                .cmp(&a_user)
+                .then_with(|| b.is_korean.cmp(&a.is_korean))
                 .then_with(|| b.is_variable.cmp(&a.is_variable))
-                .then_with(|| a.family.to_lowercase().cmp(&b.family.to_lowercase()))
+                .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
         });
         self.font_catalog = entries;
     }
@@ -1019,12 +1134,15 @@ impl FigcraftAndroidShell {
                         if !cat_ok {
                             continue;
                         }
-                        if !q.is_empty() && !item.family.to_lowercase().contains(&q) {
+                        if !q.is_empty()
+                            && !item.family.to_lowercase().contains(&q)
+                            && !item.display_name.to_lowercase().contains(&q)
+                        {
                             continue;
                         }
                         shown += 1;
                         ui.horizontal(|ui| {
-                            if ui.button(&item.family).clicked() {
+                            if ui.button(&item.display_name).clicked() {
                                 apply_family = Some(item.family.clone());
                             }
                             if item.is_variable {
@@ -1053,11 +1171,17 @@ impl FigcraftAndroidShell {
                 .fig
                 .session
                 .execute("text.style", &json!({ "fontFamily": fam }))
-                .is_ok();
-            if !ok {
-                self.fig.run("node.set", json!({ "fontFamily": fam }));
+                .is_ok()
+                || self
+                    .fig
+                    .session
+                    .execute("node.set", &json!({ "fontFamily": fam }))
+                    .is_ok();
+            if ok {
+                self.status_banner = Some(format!("폰트 적용: {fam}"));
+            } else {
+                self.status_banner = Some("먼저 캔버스에서 텍스트 레이어를 선택해 주세요".into());
             }
-            self.status_banner = Some(format!("폰트 적용: {fam}"));
         }
     }
 
