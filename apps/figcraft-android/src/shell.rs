@@ -2238,7 +2238,7 @@ impl FigcraftAndroidShell {
                                 "content": [{
                                     "type": "text",
                                     "text": format!(
-                                        "FigCraft Mobile v29 active (active_doc="{}", docs={}, local={}, https_tunnel="{}", paused={}, mouse={})",
+                                        "FigCraft Mobile v29 active (active_doc=\"{}\", docs={}, local={}, https_tunnel=\"{}\", paused={}, mouse={})",
                                         active_doc_name,
                                         self.fig.session.docs.len(),
                                         self.mcp_endpoint_label,
