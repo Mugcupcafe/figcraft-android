@@ -2,9 +2,10 @@
 
 use crate::agent_bubble::AgentBubbleState;
 use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig};
+use crate::ngrok_tunnel::{NgrokEvent, NgrokTunnelHandle};
 use crate::platform;
 use crate::protocol::{ActivityEvent, StylusAction};
-use crate::services::{AndroidServices, AndroidShellPrefs, ToolbarButtonId};
+use crate::services::{AndroidServices, AndroidShellPrefs, ToolbarButtonId, TunnelProvider};
 use crate::touch::TabletInputState;
 use figcraft_engine::branches::{needs_copy, recovery_copy, stamp};
 use figcraft_engine::Session;
@@ -204,6 +205,13 @@ pub struct FigcraftAndroidShell {
     last_recovery_stamps: Vec<(u64, Vec<u64>)>,
     last_recovery_save: std::time::Instant,
     agent_bubble: AgentBubbleState,
+    mcp_window_open: bool,
+    mcp_window_anchor: Option<egui::Pos2>,
+    mcp_window_open_seq: u64,
+    ngrok_tunnel: Option<NgrokTunnelHandle>,
+    tunnel_state: String,
+    tunnel_url: String,
+    tunnel_msg: String,
 }
 
 impl FigcraftAndroidShell {
@@ -347,6 +355,13 @@ impl FigcraftAndroidShell {
             last_recovery_stamps: Vec::new(),
             last_recovery_save: std::time::Instant::now(),
             agent_bubble: AgentBubbleState::default(),
+            mcp_window_open: false,
+            mcp_window_anchor: None,
+            mcp_window_open_seq: 0,
+            ngrok_tunnel: None,
+            tunnel_state: "stopped".into(),
+            tunnel_url: String::new(),
+            tunnel_msg: String::new(),
         }
     }
 
@@ -685,9 +700,26 @@ impl FigcraftAndroidShell {
                 }
             }
             ToolbarButtonId::Mcp => {
-                let mcp_label = if self.mcp_lan_mode { "MCP: 공유" } else { "MCP: 로컬" };
-                if ui.add(egui::Button::new(mcp_label).min_size(egui::vec2(76.0, h))).clicked() {
-                    self.toggle_mcp_lan();
+                let mcp_label = if self.tunnel_state == "connected" {
+                    "MCP ●"
+                } else if self.tunnel_state == "connecting" {
+                    "MCP …"
+                } else if self.mcp_lan_mode {
+                    "MCP: 공유"
+                } else {
+                    "MCP: 로컬"
+                };
+                let resp = ui.add(
+                    egui::Button::new(mcp_label)
+                        .selected(self.mcp_window_open || self.tunnel_state == "connected")
+                        .min_size(egui::vec2(76.0, h)),
+                );
+                if resp.clicked() {
+                    self.mcp_window_open = !self.mcp_window_open;
+                    if self.mcp_window_open {
+                        self.mcp_window_anchor = Some(egui::pos2(resp.rect.left(), resp.rect.bottom() + 6.0));
+                        self.mcp_window_open_seq = self.mcp_window_open_seq.wrapping_add(1);
+                    }
                 }
             }
             ToolbarButtonId::CopyToken => {
@@ -737,6 +769,293 @@ impl FigcraftAndroidShell {
         let min_y = screen.top() + 8.0;
         let max_y = (screen.bottom() - win_h - 8.0).max(min_y);
         egui::pos2(raw.x.clamp(min_x, max_x), raw.y.clamp(min_y, max_y))
+    }
+
+    fn poll_ngrok_tunnel(&mut self) {
+        let mut events = Vec::new();
+        if let Some(handle) = &self.ngrok_tunnel {
+            while let Ok(ev) = handle.rx.try_recv() {
+                events.push(ev);
+            }
+        }
+        for ev in events {
+            match ev {
+                NgrokEvent::Connecting(msg) => {
+                    self.tunnel_state = "connecting".into();
+                    self.tunnel_msg = msg;
+                }
+                NgrokEvent::Connected { mcp_url } => {
+                    self.tunnel_state = "connected".into();
+                    self.tunnel_url = mcp_url;
+                    self.tunnel_msg = "ngrok 연결 완료".into();
+                }
+                NgrokEvent::Error(msg) => {
+                    self.tunnel_state = "error".into();
+                    self.tunnel_url.clear();
+                    self.tunnel_msg = msg;
+                    self.ngrok_tunnel = None;
+                }
+                NgrokEvent::Stopped => {
+                    self.tunnel_state = "stopped".into();
+                    self.tunnel_url.clear();
+                    self.tunnel_msg = "ngrok 터널 중지됨".into();
+                    self.ngrok_tunnel = None;
+                }
+            }
+        }
+    }
+
+    fn stop_active_tunnel(&mut self) {
+        if let Some(mut ng) = self.ngrok_tunnel.take() {
+            ng.stop();
+        }
+        self.services.tunnel_stop_cf();
+        self.tunnel_state = "stopped".into();
+        self.tunnel_url.clear();
+        self.tunnel_msg = "터널이 중지되었습니다".into();
+    }
+
+    fn start_selected_tunnel(&mut self) {
+        if let Some(mut ng) = self.ngrok_tunnel.take() {
+            ng.stop();
+        }
+        self.services.tunnel_stop_cf();
+        let port = self
+            .mcp_server
+            .as_ref()
+            .map(|s| s.config.bind_addr.port())
+            .unwrap_or(47800);
+        match self.prefs.tunnel_provider {
+            TunnelProvider::CloudflareQuick => {
+                self.tunnel_state = "connecting".into();
+                self.tunnel_url.clear();
+                self.tunnel_msg = "Cloudflare 퀵터널 시작 중...".into();
+                self.services.tunnel_start_cf_quick(port);
+            }
+            TunnelProvider::CloudflareNamed => {
+                self.tunnel_state = "connecting".into();
+                self.tunnel_url.clear();
+                self.tunnel_msg = "Cloudflare 고정터널 시작 중...".into();
+                self.services.tunnel_start_cf_named(
+                    &self.prefs.cf_tunnel_token,
+                    &self.prefs.cf_tunnel_domain,
+                );
+            }
+            TunnelProvider::Ngrok => {
+                self.tunnel_state = "connecting".into();
+                self.tunnel_url.clear();
+                self.tunnel_msg = "ngrok 연결 중...".into();
+                self.ngrok_tunnel = Some(NgrokTunnelHandle::start(
+                    self.prefs.ngrok_authtoken.clone(),
+                    self.prefs.ngrok_domain.clone(),
+                    port,
+                ));
+            }
+        }
+    }
+
+    fn show_mcp_tunnel_window(&mut self, ctx: &egui::Context) {
+        if !self.mcp_window_open {
+            return;
+        }
+        let mut open = self.mcp_window_open;
+        let win_w = 340.0;
+        let pos = Self::clamped_popup_pos(ctx, self.mcp_window_anchor, win_w, 430.0);
+        let bearer_token = self
+            .mcp_server
+            .as_ref()
+            .map(|s| s.config.bearer_token.clone())
+            .unwrap_or_default();
+
+        egui::Window::new("MCP · HTTPS 터널")
+            .order(egui::Order::Foreground)
+            .id(egui::Id::unique(("mcp_tunnel_win", self.mcp_window_open_seq)))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .fixed_pos(pos)
+            .fixed_size(egui::vec2(win_w, 0.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let local_lbl = if self.mcp_lan_mode { "Wi-Fi 공유 켜짐" } else { "로컬 전용 (127.0.0.1)" };
+                    ui.strong(local_lbl);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let toggle_lbl = if self.mcp_lan_mode { "로컬로 전환" } else { "Wi-Fi 공유" };
+                        if ui.button(toggle_lbl).clicked() {
+                            self.toggle_mcp_lan();
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.small(&self.mcp_endpoint_label);
+                    if !bearer_token.is_empty() && ui.small_button("토큰 복사").clicked() {
+                        self.services.set_clipboard_text(&bearer_token);
+                        ctx.copy_text(bearer_token.clone());
+                        self.status_banner = Some("MCP 토큰 복사됨".into());
+                    }
+                });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.strong("공개 HTTPS 터널 방식 선택");
+                let mut prefs_dirty = false;
+                if ui
+                    .radio_value(
+                        &mut self.prefs.tunnel_provider,
+                        TunnelProvider::CloudflareQuick,
+                        "Cloudflare 퀵터널 (무료 · 무로그인 · 임시 주소)",
+                    )
+                    .changed()
+                {
+                    prefs_dirty = true;
+                }
+                if ui
+                    .radio_value(
+                        &mut self.prefs.tunnel_provider,
+                        TunnelProvider::CloudflareNamed,
+                        "Cloudflare 고정터널 (토큰 · 본인 도메인)",
+                    )
+                    .changed()
+                {
+                    prefs_dirty = true;
+                }
+                if ui
+                    .radio_value(
+                        &mut self.prefs.tunnel_provider,
+                        TunnelProvider::Ngrok,
+                        "ngrok (무료 계정 · 0원 고정 도메인)",
+                    )
+                    .changed()
+                {
+                    prefs_dirty = true;
+                }
+
+                ui.add_space(6.0);
+                match self.prefs.tunnel_provider {
+                    TunnelProvider::CloudflareQuick => {
+                        ui.weak("별도 가입 없이 버튼 한 번으로 https://xxxx.trycloudflare.com/mcp 주소를 발급합니다.");
+                    }
+                    TunnelProvider::CloudflareNamed => {
+                        ui.small("Cloudflare Tunnel Token");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.prefs.cf_tunnel_token)
+                                    .password(true)
+                                    .hint_text("eyJhIjoi...")
+                                    .desired_width(316.0),
+                            )
+                            .changed()
+                        {
+                            prefs_dirty = true;
+                        }
+                        ui.small("연결된 고정 도메인 (표시/복사용, 선택)");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.prefs.cf_tunnel_domain)
+                                    .hint_text("예: figcraft.mydomain.com")
+                                    .desired_width(316.0),
+                            )
+                            .changed()
+                        {
+                            prefs_dirty = true;
+                        }
+                    }
+                    TunnelProvider::Ngrok => {
+                        ui.small("ngrok Authtoken (dashboard.ngrok.com)");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.prefs.ngrok_authtoken)
+                                    .password(true)
+                                    .hint_text("2abc...")
+                                    .desired_width(316.0),
+                            )
+                            .changed()
+                        {
+                            prefs_dirty = true;
+                        }
+                        ui.small("무료 고정 도메인 (비우면 자동 할당)");
+                        if ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.prefs.ngrok_domain)
+                                    .hint_text("예: my-name.ngrok-free.app")
+                                    .desired_width(316.0),
+                            )
+                            .changed()
+                        {
+                            prefs_dirty = true;
+                        }
+                    }
+                }
+                if prefs_dirty {
+                    self.services.save_prefs(&self.prefs);
+                }
+
+                ui.add_space(8.0);
+                let is_running = self.tunnel_state == "connected" || self.tunnel_state == "connecting";
+                ui.horizontal(|ui| {
+                    if is_running {
+                        if ui
+                            .add(egui::Button::new("HTTPS 터널 끄기").min_size(egui::vec2(150.0, 34.0)))
+                            .clicked()
+                        {
+                            self.stop_active_tunnel();
+                        }
+                    } else if ui
+                        .add(egui::Button::new("HTTPS 터널 켜기").min_size(egui::vec2(150.0, 34.0)))
+                        .clicked()
+                    {
+                        self.start_selected_tunnel();
+                    }
+
+                    let (st_col, st_txt) = match self.tunnel_state.as_str() {
+                        "connected" => (egui::Color32::from_rgb(72, 224, 134), "연결됨"),
+                        "connecting" => (egui::Color32::from_rgb(245, 194, 84), "연결 중..."),
+                        "error" => (egui::Color32::from_rgb(245, 110, 110), "오류"),
+                        _ => (egui::Color32::from_rgb(150, 158, 170), "꺼짐"),
+                    };
+                    ui.colored_label(st_col, st_txt);
+                });
+
+                if !self.tunnel_msg.is_empty() {
+                    ui.small(&self.tunnel_msg);
+                }
+
+                if !self.tunnel_url.is_empty() {
+                    ui.add_space(6.0);
+                    egui::Frame::group(ui.style())
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.small("공개 HTTPS MCP 주소");
+                            ui.strong(&self.tunnel_url);
+                            ui.horizontal(|ui| {
+                                if ui.button("HTTPS 주소 복사").clicked() {
+                                    self.services.set_clipboard_text(&self.tunnel_url);
+                                    ctx.copy_text(self.tunnel_url.clone());
+                                    self.status_banner = Some("HTTPS MCP 주소 복사됨".into());
+                                }
+                                if ui.button("Gemini CLI JSON 복사").clicked() {
+                                    let cfg = json!({
+                                        "mcpServers": {
+                                            "figcraft": {
+                                                "httpUrl": self.tunnel_url,
+                                                "headers": {
+                                                    "Authorization": format!("Bearer {bearer_token}")
+                                                }
+                                            }
+                                        }
+                                    });
+                                    let txt = serde_json::to_string_pretty(&cfg).unwrap_or_default();
+                                    self.services.set_clipboard_text(&txt);
+                                    ctx.copy_text(txt);
+                                    self.status_banner = Some("Gemini CLI 설정 JSON 복사됨".into());
+                                }
+                            });
+                        });
+                }
+            });
+        self.mcp_window_open = open;
     }
 
     fn show_toolbar_editor_window(&mut self, ctx: &egui::Context) {
@@ -1557,6 +1876,13 @@ impl FigcraftAndroidShell {
                         self.save_recovery_snapshots(true);
                     }
                 }
+                ActivityEvent::TunnelState { state, url, message } => {
+                    self.tunnel_state = state;
+                    if !url.is_empty() || self.tunnel_state == "stopped" || self.tunnel_state == "error" {
+                        self.tunnel_url = url;
+                    }
+                    self.tunnel_msg = message;
+                }
             }
         }
 
@@ -2278,7 +2604,9 @@ impl eframe::App for FigcraftAndroidShell {
 
         self.show_toolbar_editor_window(&ctx);
         self.show_mouse_settings_window(&ctx);
+        self.poll_ngrok_tunnel();
         self.show_drive_window(&ctx);
+        self.show_mcp_tunnel_window(&ctx);
         self.show_font_browser_window(&ctx);
         let agent_actions = self.agent_bubble.show(
             &ctx,
@@ -2292,6 +2620,11 @@ impl eframe::App for FigcraftAndroidShell {
         }
         if agent_actions.prefs_dirty {
             self.services.save_prefs(&self.prefs);
+        }
+        if agent_actions.open_mcp_tunnel {
+            self.mcp_window_open = true;
+            self.mcp_window_anchor = None;
+            self.mcp_window_open_seq = self.mcp_window_open_seq.wrapping_add(1);
         }
         self.tablet_input.paint_virtual_cursor(&ctx);
 
