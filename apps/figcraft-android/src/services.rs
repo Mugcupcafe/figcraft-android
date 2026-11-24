@@ -117,6 +117,18 @@ fn default_mouse_grip_distance() -> f32 {
     52.0
 }
 
+fn default_mouse_grip_offset() -> f32 {
+    56.0
+}
+
+fn default_mouse_grip_opacity() -> f32 {
+    0.45
+}
+
+fn default_mouse_border_width() -> f32 {
+    2.0
+}
+
 fn default_true() -> bool {
     true
 }
@@ -133,6 +145,14 @@ pub struct AndroidShellPrefs {
     pub mouse_cursor_scale: f32,
     #[serde(default = "default_mouse_grip_distance")]
     pub mouse_grip_distance: f32,
+    #[serde(default = "default_mouse_grip_offset")]
+    pub mouse_grip_offset_x: f32,
+    #[serde(default = "default_mouse_grip_offset")]
+    pub mouse_grip_offset_y: f32,
+    #[serde(default = "default_mouse_grip_opacity")]
+    pub mouse_grip_opacity: f32,
+    #[serde(default = "default_mouse_border_width")]
+    pub mouse_border_width: f32,
     #[serde(default)]
     pub drive_client_id: String,
     #[serde(default)]
@@ -154,6 +174,10 @@ impl Default for AndroidShellPrefs {
             pinned_toolbar_buttons: Vec::new(),
             mouse_cursor_scale: default_mouse_cursor_scale(),
             mouse_grip_distance: default_mouse_grip_distance(),
+            mouse_grip_offset_x: default_mouse_grip_offset(),
+            mouse_grip_offset_y: default_mouse_grip_offset(),
+            mouse_grip_opacity: default_mouse_grip_opacity(),
+            mouse_border_width: default_mouse_border_width(),
             drive_client_id: String::new(),
             drive_client_secret: String::new(),
             drive_auto_sync: true,
@@ -200,7 +224,11 @@ impl AndroidServices {
         prefs.pinned_toolbar_buttons.retain(|b| *b != ToolbarButtonId::UiZoom);
         prefs.toolbar_buttons.retain(|b| !prefs.pinned_toolbar_buttons.contains(b));
         prefs.mouse_cursor_scale = prefs.mouse_cursor_scale.clamp(0.6, 2.0);
-        prefs.mouse_grip_distance = prefs.mouse_grip_distance.clamp(24.0, 120.0);
+        prefs.mouse_grip_distance = prefs.mouse_grip_distance.clamp(24.0, 200.0);
+        prefs.mouse_grip_offset_x = prefs.mouse_grip_offset_x.clamp(-200.0, 200.0);
+        prefs.mouse_grip_offset_y = prefs.mouse_grip_offset_y.clamp(-200.0, 200.0);
+        prefs.mouse_grip_opacity = prefs.mouse_grip_opacity.clamp(0.05, 1.0);
+        prefs.mouse_border_width = prefs.mouse_border_width.clamp(0.5, 5.0);
         if !prefs.drive_button_migrated {
             if !prefs.toolbar_buttons.contains(&ToolbarButtonId::Drive) && !prefs.pinned_toolbar_buttons.contains(&ToolbarButtonId::Drive) {
                 let pos = prefs.toolbar_buttons.iter().position(|b| *b == ToolbarButtonId::Open).map(|i| i + 1).unwrap_or(0);
