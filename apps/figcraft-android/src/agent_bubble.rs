@@ -1053,7 +1053,6 @@ impl AgentBubbleState {
         self.ensure_textures(ctx);
         let state = self.current_state();
         let size = prefs.ai_bubble_size.clamp(36.0, 96.0);
-        let dark_mode = ctx.style().visuals.dark_mode;
 
         let min_x = screen.left() + 8.0;
         let max_x = (screen.right() - size - 8.0).max(min_x);
@@ -1132,28 +1131,6 @@ impl AgentBubbleState {
 
         if !self.popover_open {
             let bubble_cx = pos.x + size * 0.5;
-            let card_bg = if dark_mode {
-                Color32::from_rgba_unmultiplied(30, 34, 42, 242)
-            } else {
-                Color32::from_rgba_unmultiplied(255, 255, 255, 248)
-            };
-            let title_col = if dark_mode {
-                Color32::from_rgb(245, 248, 252)
-            } else {
-                Color32::from_rgb(20, 24, 30)
-            };
-            let sub_col = if dark_mode {
-                Color32::from_rgb(198, 208, 220)
-            } else {
-                Color32::from_rgb(92, 100, 112)
-            };
-            let card_stroke = if status_row.is_some() {
-                Stroke::new(1.2, state.accent_color())
-            } else if dark_mode {
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32))
-            } else {
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 22))
-            };
 
             // Measure card size cleanly
             let (card_w, card_h, overlap_y) = if let Some((_, ref status_txt)) = status_row {
@@ -1178,6 +1155,29 @@ impl AgentBubbleState {
                 .fixed_pos(card_rect.left_top())
                 .interactable(false)
                 .show(ctx, |ui| {
+                    let dark_mode = ui.style().visuals.dark_mode;
+                    let card_bg = if dark_mode {
+                        Color32::from_rgba_unmultiplied(30, 34, 42, 242)
+                    } else {
+                        Color32::from_rgba_unmultiplied(255, 255, 255, 248)
+                    };
+                    let title_col = if dark_mode {
+                        Color32::from_rgb(245, 248, 252)
+                    } else {
+                        Color32::from_rgb(20, 24, 30)
+                    };
+                    let sub_col = if dark_mode {
+                        Color32::from_rgb(198, 208, 220)
+                    } else {
+                        Color32::from_rgb(92, 100, 112)
+                    };
+                    let card_stroke = if status_row.is_some() {
+                        Stroke::new(1.2, state.accent_color())
+                    } else if dark_mode {
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 32))
+                    } else {
+                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 22))
+                    };
                     let painter = ui.painter();
                     let radius = if status_row.is_some() { 16 } else { 13 };
                     // Soft card shadow
