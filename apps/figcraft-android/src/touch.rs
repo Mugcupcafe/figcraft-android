@@ -242,6 +242,24 @@ impl TabletInputState {
         false
     }
 
+    /// Pure center canvas region excluding top bar, doc tab bar, left/right side panels, and bottom tool dock.
+    fn is_inside_center_canvas(&self, pos: egui::Pos2) -> bool {
+        if !self.is_inside_canvas(pos) {
+            return false;
+        }
+        let sr = self.screen_rect;
+        if sr.width() <= 10.0 || sr.height() <= 10.0 {
+            return false;
+        }
+        let side_panel_w = if sr.width() > 640.0 { 265.0 } else { 0.0 };
+        let top_cut = self.top_bar_bottom_pt + 44.0;
+        let bottom_cut = sr.bottom() - 84.0;
+        pos.x > sr.left() + side_panel_w
+            && pos.x < sr.right() - side_panel_w
+            && pos.y > top_cut
+            && pos.y < bottom_cut
+    }
+
     fn is_inside_canvas(&self, pos: egui::Pos2) -> bool {
         if self.is_in_shell_chrome(pos) {
             return false;
@@ -305,9 +323,15 @@ impl TabletInputState {
                     egui::TouchPhase::Start => {
                         self.active_touches.insert(*id, *pos);
                         if self.active_touches.len() == 1 && !palm_active && in_canvas {
-                            if self.modifiers.space_pan {
+                            let mouse_canvas_pan =
+                                self.mouse_cursor_mode && self.is_inside_center_canvas(*pos);
+                            if self.modifiers.space_pan || mouse_canvas_pan {
                                 self.hand_pan_last_pos = Some(*pos);
                                 self.long_press = None;
+                                if mouse_canvas_pan {
+                                    self.suppressed_touch_id = Some(*id);
+                                    suppress_this_frame = true;
+                                }
                             } else {
                                 if let Some((prev_t, prev_pos)) = self.last_tap {
                                     if prev_t.elapsed() <= DOUBLE_TAP_WINDOW
@@ -334,11 +358,14 @@ impl TabletInputState {
                     }
                     egui::TouchPhase::Move => {
                         self.active_touches.insert(*id, *pos);
-                        if self.active_touches.len() == 1 && self.modifiers.space_pan && !palm_active {
+                        if self.active_touches.len() == 1
+                            && (self.modifiers.space_pan || self.mouse_cursor_mode)
+                            && !palm_active
+                        {
                             if let Some(prev) = self.hand_pan_last_pos {
                                 hand_pan_delta += *pos - prev;
                                 self.hand_pan_last_pos = Some(*pos);
-                            } else if in_canvas {
+                            } else if self.modifiers.space_pan && in_canvas {
                                 self.hand_pan_last_pos = Some(*pos);
                             }
                         }
@@ -398,7 +425,7 @@ impl TabletInputState {
             });
         }
 
-        if self.modifiers.space_pan
+        if (self.modifiers.space_pan || self.mouse_cursor_mode)
             && self.active_touches.len() == 1
             && !palm_active
             && self.hand_pan_last_pos.is_some()
