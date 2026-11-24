@@ -144,6 +144,14 @@ fn default_neg_one() -> f32 {
     -1.0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum TunnelProvider {
+    #[default]
+    CloudflareQuick,
+    CloudflareNamed,
+    Ngrok,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AndroidShellPrefs {
     pub ui_zoom_factor: f32,
@@ -190,6 +198,16 @@ pub struct AndroidShellPrefs {
     pub ai_cursor_enabled: bool,
     #[serde(default)]
     pub ai_agent_name: String,
+    #[serde(default)]
+    pub tunnel_provider: TunnelProvider,
+    #[serde(default)]
+    pub cf_tunnel_token: String,
+    #[serde(default)]
+    pub cf_tunnel_domain: String,
+    #[serde(default)]
+    pub ngrok_authtoken: String,
+    #[serde(default)]
+    pub ngrok_domain: String,
 }
 
 impl Default for AndroidShellPrefs {
@@ -218,6 +236,11 @@ impl Default for AndroidShellPrefs {
             ai_bubble_show_speech: true,
             ai_cursor_enabled: true,
             ai_agent_name: String::new(),
+            tunnel_provider: TunnelProvider::CloudflareQuick,
+            cf_tunnel_token: String::new(),
+            cf_tunnel_domain: String::new(),
+            ngrok_authtoken: String::new(),
+            ngrok_domain: String::new(),
         }
     }
 }
@@ -488,6 +511,19 @@ impl AndroidServices {
     pub fn drive_open_file(&self, file_id: &str, name: &str) {
         let arg = format!("{file_id}{SEP}{name}");
         let _ = platform::call_activity("drive_open", &arg);
+    }
+
+    pub fn tunnel_start_cf_quick(&self, port: u16) {
+        let _ = platform::call_activity("tunnel_cf_quick", &port.to_string());
+    }
+
+    pub fn tunnel_start_cf_named(&self, token: &str, domain: &str) {
+        let arg = format!("{token}{SEP}{domain}");
+        let _ = platform::call_activity("tunnel_cf_named", &arg);
+    }
+
+    pub fn tunnel_stop_cf(&self) {
+        let _ = platform::call_activity("tunnel_stop", "");
     }
 
     pub fn font_search_dirs(&self) -> Vec<PathBuf> {
