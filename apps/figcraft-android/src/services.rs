@@ -153,6 +153,8 @@ pub struct AndroidShellPrefs {
     pub mouse_grip_opacity: f32,
     #[serde(default = "default_mouse_border_width")]
     pub mouse_border_width: f32,
+    #[serde(default = "default_true")]
+    pub show_shortcut_pad: bool,
     #[serde(default)]
     pub drive_client_id: String,
     #[serde(default)]
@@ -178,6 +180,7 @@ impl Default for AndroidShellPrefs {
             mouse_grip_offset_y: default_mouse_grip_offset(),
             mouse_grip_opacity: default_mouse_grip_opacity(),
             mouse_border_width: default_mouse_border_width(),
+            show_shortcut_pad: true,
             drive_client_id: String::new(),
             drive_client_secret: String::new(),
             drive_auto_sync: true,
