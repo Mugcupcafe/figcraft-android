@@ -73,6 +73,10 @@ pub struct TabletInputState {
     pub virtual_cursor_pos: egui::Pos2,
     pub mouse_cursor_scale: f32,
     pub mouse_grip_distance: f32,
+    pub mouse_grip_offset_x: f32,
+    pub mouse_grip_offset_y: f32,
+    pub mouse_grip_opacity: f32,
+    pub mouse_border_width: f32,
     pub stylus_active: bool,
     pub last_stylus_time: Option<Instant>,
     pub last_stylus_pos_pt: egui::Pos2,
@@ -116,6 +120,10 @@ impl Default for TabletInputState {
             virtual_cursor_pos: egui::pos2(300.0, 300.0),
             mouse_cursor_scale: 1.0,
             mouse_grip_distance: 52.0,
+            mouse_grip_offset_x: 56.0,
+            mouse_grip_offset_y: 56.0,
+            mouse_grip_opacity: 0.45,
+            mouse_border_width: 2.0,
             stylus_active: false,
             last_stylus_time: None,
             last_stylus_pos_pt: egui::Pos2::ZERO,
@@ -179,16 +187,16 @@ impl TabletInputState {
     }
 
     pub fn mouse_grip_center(&self) -> egui::Pos2 {
-        let d = self.mouse_grip_distance.clamp(24.0, 120.0);
-        let offset = d * 0.7071;
+        let ox = self.mouse_grip_offset_x.clamp(-200.0, 200.0);
+        let oy = self.mouse_grip_offset_y.clamp(-200.0, 200.0);
         let r = self.mouse_grip_radius();
         let min_x = self.screen_rect.left() + r;
         let max_x = (self.screen_rect.right() - r).max(min_x);
         let min_y = self.screen_rect.top() + r;
         let max_y = (self.screen_rect.bottom() - r).max(min_y);
         egui::pos2(
-            (self.virtual_cursor_pos.x + offset).clamp(min_x, max_x),
-            (self.virtual_cursor_pos.y + offset).clamp(min_y, max_y),
+            (self.virtual_cursor_pos.x + ox).clamp(min_x, max_x),
+            (self.virtual_cursor_pos.y + oy).clamp(min_y, max_y),
         )
     }
 
@@ -699,71 +707,138 @@ impl TabletInputState {
         true
     }
 
-    /// Draws a clean desktop-style mouse cursor arrow (two convex parts + closed crisp outline)
-    /// and the bottom-right semi-transparent black touch grip circle with white border.
+    /// Draws the user's custom rounded vector mouse cursor (Frame 1.svg, hotspot at 4,4)
+    /// and the Ellipse.svg touch grip circle with adjustable ring opacity, X/Y offset, and border width.
     pub fn paint_virtual_cursor(&self, ctx: &egui::Context) {
         if !self.mouse_cursor_mode || self.is_palm_rejection_active() {
             return;
         }
+        const CURSOR_PTS: &[(f32, f32)] = &[
+    (-1.12, 15.4),
+    (-1.15, 6.39),
+    (-1.16, 4.85),
+    (-1.14, 3.56),
+    (-1.08, 2.5),
+    (-0.966, 1.63),
+    (-0.77, 0.942),
+    (-0.476, 0.395),
+    (-0.145, -0.000358),
+    (0.235, -0.342),
+    (0.657, -0.627),
+    (1.11, -0.85),
+    (1.6, -1.01),
+    (2.11, -1.1),
+    (2.73, -1.08),
+    (3.43, -0.902),
+    (4.23, -0.571),
+    (5.18, -0.0891),
+    (6.31, 0.541),
+    (7.64, 1.31),
+    (15.4, 5.85),
+    (16.9, 6.71),
+    (18.1, 7.44),
+    (19.1, 8.06),
+    (19.9, 8.58),
+    (20.4, 9.02),
+    (20.7, 9.42),
+    (21.2, 10.4),
+    (21.3, 11.3),
+    (21.2, 12.3),
+    (20.8, 13.2),
+    (20.2, 14.0),
+    (19.4, 14.6),
+    (18.9, 14.8),
+    (18.2, 14.9),
+    (17.3, 15.0),
+    (16.2, 15.1),
+    (14.7, 15.1),
+    (13.0, 15.1),
+    (12.5, 15.2),
+    (12.0, 15.2),
+    (11.6, 15.2),
+    (11.3, 15.2),
+    (11.0, 15.3),
+    (10.7, 15.4),
+    (10.5, 15.4),
+    (10.3, 15.5),
+    (10.1, 15.7),
+    (9.86, 15.8),
+    (9.66, 15.9),
+    (9.47, 16.1),
+    (9.27, 16.3),
+    (9.08, 16.5),
+    (8.88, 16.8),
+    (8.66, 17.1),
+    (8.42, 17.5),
+    (8.14, 18.0),
+    (7.25, 19.4),
+    (6.5, 20.6),
+    (5.86, 21.6),
+    (5.33, 22.4),
+    (4.87, 22.9),
+    (4.48, 23.2),
+    (3.53, 23.6),
+    (2.55, 23.8),
+    (1.58, 23.6),
+    (0.685, 23.2),
+    (-0.0899, 22.6),
+    (-0.686, 21.8),
+    (-0.857, 21.3),
+    (-0.974, 20.6),
+    (-1.05, 19.7),
+    (-1.09, 18.5),
+    (-1.11, 17.1)
+        ];
+        const CURSOR_TRIS: &[u32] = &[73, 0, 1, 73, 1, 2, 73, 2, 3, 73, 3, 4, 73, 4, 5, 73, 5, 6, 73, 6, 7, 73, 7, 8, 73, 8, 9, 73, 9, 10, 73, 10, 11, 73, 11, 12, 73, 12, 13, 73, 13, 14, 73, 14, 15, 73, 15, 16, 73, 16, 17, 73, 17, 18, 73, 18, 19, 73, 19, 20, 73, 20, 21, 73, 21, 22, 73, 22, 23, 73, 23, 24, 73, 24, 25, 73, 25, 26, 73, 26, 27, 73, 27, 28, 73, 28, 29, 73, 29, 30, 30, 31, 32, 30, 32, 33, 30, 33, 34, 30, 34, 35, 30, 35, 36, 30, 36, 37, 30, 37, 38, 30, 38, 39, 30, 39, 40, 30, 40, 41, 30, 41, 42, 73, 30, 42, 73, 42, 43, 73, 43, 44, 73, 44, 45, 73, 45, 46, 73, 46, 47, 73, 47, 48, 73, 48, 49, 73, 49, 50, 73, 50, 51, 73, 51, 52, 73, 52, 53, 73, 53, 54, 73, 54, 55, 73, 55, 56, 73, 56, 57, 73, 57, 58, 73, 58, 59, 73, 59, 60, 73, 60, 61, 73, 61, 62, 73, 62, 63, 73, 63, 64, 73, 64, 65, 73, 65, 66, 73, 66, 67, 73, 67, 68, 73, 68, 69, 73, 69, 70, 73, 70, 71, 71, 72, 73];
+
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Tooltip,
             egui::Id::unique("figcraft_virtual_mouse_cursor"),
         ));
         let p = self.virtual_cursor_pos;
         let sc = self.mouse_cursor_scale.clamp(0.6, 2.0);
+        let bw = self.mouse_border_width.clamp(0.5, 5.0);
+        let ring_opacity = self.mouse_grip_opacity.clamp(0.05, 1.0);
         let dragging = self.mouse_track.is_some_and(|t| t.is_dragging);
         let active_grip = self.mouse_track.is_some();
 
-        // 1. Bottom-right touch grip circle (semi-transparent black fill + crisp white border)
+        // 1. Touch grip circle (Ellipse.svg): ONLY the ring uses `ring_opacity`
         let grip_c = self.mouse_grip_center();
         let grip_r = self.mouse_grip_radius();
+        let fill_alpha = ((ring_opacity * if active_grip { 1.2 } else { 1.0 }).clamp(0.05, 1.0) * 255.0).round() as u8;
+        let stroke_alpha = ((ring_opacity * 1.45).clamp(0.2, 1.0) * 255.0).round() as u8;
         let grip_fill = if dragging {
-            egui::Color32::from_rgba_unmultiplied(234, 88, 12, 165)
-        } else if active_grip {
-            egui::Color32::from_rgba_unmultiplied(15, 23, 42, 195)
+            egui::Color32::from_rgba_unmultiplied(234, 88, 12, fill_alpha)
         } else {
-            egui::Color32::from_rgba_unmultiplied(15, 15, 20, 140)
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, fill_alpha)
         };
         let grip_stroke_color = if dragging {
-            egui::Color32::from_rgb(253, 186, 116)
+            egui::Color32::from_rgba_unmultiplied(253, 186, 116, stroke_alpha)
         } else {
-            egui::Color32::WHITE
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, stroke_alpha)
         };
         painter.circle(
             grip_c,
             grip_r,
             grip_fill,
-            egui::Stroke::new(2.0, grip_stroke_color),
+            egui::Stroke::new(bw, grip_stroke_color),
         );
-        // Subtle center dot inside the grip circle
-        painter.circle_filled(grip_c, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 190));
 
-        // 2. Clean desktop mouse arrow decomposed into 2 convex shapes (no triangulation gaps!)
-        let v = |x: f32, y: f32| p + egui::vec2(x * sc, y * sc);
+        // 2. Custom rounded mouse cursor (Frame 1.svg, hotspot at (4,4)) — always 100% opaque
+        let mut mesh = egui::epaint::Mesh::default();
+        let mut contour = Vec::with_capacity(CURSOR_PTS.len());
+        for &(x, y) in CURSOR_PTS {
+            let pos = p + egui::vec2(x * sc, y * sc);
+            contour.push(pos);
+            mesh.colored_vertex(pos, egui::Color32::WHITE);
+        }
+        mesh.indices.extend_from_slice(CURSOR_TRIS);
+        painter.add(egui::Shape::mesh(mesh));
 
-        // Arrowhead (convex 4-gon: tip -> bottom-left -> notch -> right-wing)
-        let head = vec![v(0.0, 0.0), v(0.0, 18.0), v(5.0, 13.5), v(13.0, 13.0)];
-        // Shaft (convex 4-gon)
-        let shaft = vec![v(4.8, 13.2), v(8.2, 21.0), v(11.0, 19.8), v(7.6, 12.6)];
-
-        let fill = egui::Color32::WHITE;
-        let outline = egui::Color32::from_rgb(15, 23, 42);
-        painter.add(egui::Shape::convex_polygon(head, fill, egui::Stroke::NONE));
-        painter.add(egui::Shape::convex_polygon(shaft, fill, egui::Stroke::NONE));
-
-        // Crisp continuous outer contour around the entire arrow
-        let contour = vec![
-            v(0.0, 0.0),
-            v(0.0, 18.0),
-            v(4.8, 13.6),
-            v(8.2, 21.0),
-            v(11.0, 19.8),
-            v(7.6, 12.8),
-            v(13.0, 13.0),
-        ];
+        // Crisp outer black border around the rounded cursor
         painter.add(egui::Shape::closed_line(
             contour,
-            egui::Stroke::new((1.6 * sc).clamp(1.2, 2.6), outline),
+            egui::Stroke::new(bw, egui::Color32::from_rgb(17, 17, 17)),
         ));
     }
 
