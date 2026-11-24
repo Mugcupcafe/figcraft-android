@@ -2218,7 +2218,7 @@ impl eframe::App for FigcraftAndroidShell {
         if wants_kb_now != self.last_wants_keyboard {
             self.last_wants_keyboard = wants_kb_now;
             self.game_ime_active = wants_kb_now;
-            self.game_ime_committed_bytes = 1;
+            self.game_ime_prev_committed = " ".to_owned();
             self.game_ime_last_composing.clear();
             platform::game_show_soft_input(wants_kb_now);
         }
