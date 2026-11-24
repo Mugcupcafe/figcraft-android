@@ -1,7 +1,7 @@
 //! Main `eframe::App` wrapper hosting the real `figcraft_ui_egui::FigApp` inside Android `GameActivity` (V8 · egui 0.37).
 
 use crate::agent_bubble::AgentBubbleState;
-use crate::mcp_http::{EmbeddedMcpServer, McpServerConfig};
+use crate::mcp_http::{self, EmbeddedMcpServer, McpServerConfig};
 use crate::ngrok_tunnel::{NgrokEvent, NgrokTunnelHandle};
 use crate::platform;
 use crate::protocol::{ActivityEvent, StylusAction};
@@ -230,7 +230,7 @@ impl FigcraftAndroidShell {
 
     fn init_common(cc: &eframe::CreationContext<'_>, internal_dir: PathBuf) -> Self {
         let services = AndroidServices::new(internal_dir.clone());
-        let prefs = services.load_prefs();
+        let mut prefs = services.load_prefs();
         if prefs.immersive_mode {
             services.set_immersive_mode(true);
         }
@@ -285,7 +285,15 @@ impl FigcraftAndroidShell {
         let mut status_banner = None;
         let mut mcp_endpoint_label = String::new();
 
-        let mcp_server = match EmbeddedMcpServer::start(McpServerConfig::default()) {
+        if prefs.mcp_bearer_token.trim().is_empty() {
+            prefs.mcp_bearer_token = mcp_http::generate_session_token();
+            services.save_prefs(&prefs);
+        }
+        let initial_mcp_cfg = McpServerConfig::with_token(
+            "127.0.0.1:47800".parse().expect("valid loopback addr"),
+            prefs.mcp_bearer_token.clone(),
+        );
+        let mcp_server = match EmbeddedMcpServer::start(initial_mcp_cfg) {
             Ok(srv) => {
                 mcp_endpoint_label = format!("http://{}/mcp", srv.config.bind_addr);
                 status_banner = Some(format!("MCP: {mcp_endpoint_label}"));
@@ -805,6 +813,21 @@ impl FigcraftAndroidShell {
         }
     }
 
+    fn regenerate_mcp_token(&mut self) {
+        let new_tok = mcp_http::generate_session_token();
+        self.prefs.mcp_bearer_token = new_tok.clone();
+        self.services.save_prefs(&self.prefs);
+        let bind_str = if self.mcp_lan_mode { "0.0.0.0:47800" } else { "127.0.0.1:47800" };
+        if let Ok(bind_addr) = bind_str.parse::<SocketAddr>() {
+            self.mcp_server = None;
+            let cfg = McpServerConfig::with_token(bind_addr, new_tok);
+            if let Ok(srv) = EmbeddedMcpServer::start(cfg) {
+                self.mcp_server = Some(srv);
+                self.status_banner = Some("MCP 토큰이 새로 발급되었습니다".into());
+            }
+        }
+    }
+
     fn stop_active_tunnel(&mut self) {
         if let Some(mut ng) = self.ngrok_tunnel.take() {
             ng.stop();
@@ -891,9 +914,13 @@ impl FigcraftAndroidShell {
                     if !bearer_token.is_empty() && ui.small_button("토큰 복사").clicked() {
                         self.services.set_clipboard_text(&bearer_token);
                         ctx.copy_text(bearer_token.clone());
-                        self.status_banner = Some("MCP 토큰 복사됨".into());
+                        self.status_banner = Some("고정 MCP 토큰 복사됨".into());
+                    }
+                    if ui.small_button("재발급").clicked() {
+                        self.regenerate_mcp_token();
                     }
                 });
+                ui.weak("토큰은 앱 재실행·Wi-Fi 전환 후에도 고정 유지됩니다.");
 
                 ui.add_space(6.0);
                 ui.separator();
@@ -1639,10 +1666,11 @@ impl FigcraftAndroidShell {
         };
 
         self.mcp_server = None;
-        let cfg = McpServerConfig {
-            bind_addr,
-            ..McpServerConfig::default()
-        };
+        if self.prefs.mcp_bearer_token.trim().is_empty() {
+            self.prefs.mcp_bearer_token = mcp_http::generate_session_token();
+            self.services.save_prefs(&self.prefs);
+        }
+        let cfg = McpServerConfig::with_token(bind_addr, self.prefs.mcp_bearer_token.clone());
         match EmbeddedMcpServer::start(cfg) {
             Ok(srv) => {
                 self.mcp_lan_mode = next_lan;
@@ -1965,8 +1993,109 @@ impl FigcraftAndroidShell {
                 "id": id,
                 "result": {
                     "tools": [
-                        { "name": "engine.execute", "description": "Execute a FigCraft engine command on the live tablet document" },
-                        { "name": "figcraft.status", "description": "Return Android tablet shell & document status" }
+                        {
+                            "name": "figcraft.status",
+                            "description": "Return active document name, open doc count, tunnel URL, paused state, and tablet shell status.",
+                            "inputSchema": { "type": "object", "properties": {} }
+                        },
+                        {
+                            "name": "list_commands",
+                            "description": "List available FigCraft engine commands and common usage examples (optional filter substring).",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "filter": { "type": "string", "description": "Optional substring filter (e.g. 'node', 'text', 'layout', 'fill')" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "engine.execute",
+                            "description": "Execute any FigCraft engine command on the live canvas (e.g. node.create, node.set, node.get, node.delete, text.create, fill.set, stroke.set, effect.add, layout.add, align.left, distribute.horizontal, component.create, doc.inspect, file.newFromTemplate, edit.undo, edit.redo).",
+                            "inputSchema": {
+                                "type": "object",
+                                "required": ["command"],
+                                "properties": {
+                                    "command": { "type": "string", "description": "FigCraft engine command id" },
+                                    "params": { "type": "object", "description": "JSON parameters for the command" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "create_node",
+                            "description": "Create a frame, rectangle, ellipse, text, polygon, star, line, arrow, vector, section, or component on the live canvas.",
+                            "inputSchema": {
+                                "type": "object",
+                                "required": ["type"],
+                                "properties": {
+                                    "type": { "type": "string", "description": "frame|rectangle|ellipse|text|polygon|star|line|arrow|vector|section|component" },
+                                    "name": { "type": "string" },
+                                    "x": { "type": "number" },
+                                    "y": { "type": "number" },
+                                    "width": { "type": "number" },
+                                    "height": { "type": "number" },
+                                    "parent": { "type": "integer" },
+                                    "text": { "type": "string" },
+                                    "props": { "type": "object" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "set_properties",
+                            "description": "Update geometry, fills, strokes, cornerRadius, layout, padding, gap, opacity, text, or typography on layer ids.",
+                            "inputSchema": {
+                                "type": "object",
+                                "required": ["props"],
+                                "properties": {
+                                    "ids": { "type": "array", "items": { "type": "integer" } },
+                                    "props": { "type": "object" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "inspect_document",
+                            "description": "Inspect the active document layer tree, selection, and styles.",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "depth": { "type": "integer" },
+                                    "allPages": { "type": "boolean" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "get_node",
+                            "description": "Inspect a single layer by id.",
+                            "inputSchema": {
+                                "type": "object",
+                                "required": ["id"],
+                                "properties": {
+                                    "id": { "type": "integer" },
+                                    "depth": { "type": "integer" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "undo",
+                            "description": "Undo the last edit step on the active document.",
+                            "inputSchema": { "type": "object", "properties": {} }
+                        },
+                        {
+                            "name": "redo",
+                            "description": "Redo the last undone edit step on the active document.",
+                            "inputSchema": { "type": "object", "properties": {} }
+                        },
+                        {
+                            "name": "new_from_template",
+                            "description": "Create a new starter design from a built-in template (mobile-app, landing-page, dashboard, design-system, wireframe-kit, social-posts, slides, icon-set).",
+                            "inputSchema": {
+                                "type": "object",
+                                "required": ["template"],
+                                "properties": {
+                                    "template": { "type": "string" },
+                                    "name": { "type": "string" }
+                                }
+                            }
+                        }
                     ]
                 }
             }),
@@ -1979,21 +2108,20 @@ impl FigcraftAndroidShell {
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                if name == "engine.execute" {
-                    let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
-                    let cmd_params = args.get("params").cloned().unwrap_or_else(|| json!({}));
-                    let canvas_rect = self.tablet_input.canvas_rect;
-                    if self.agent_bubble.paused {
-                        self.agent_bubble.record_activity_with_target(cmd, false, Some(&cmd_params), None, canvas_rect);
+                let canvas_rect = self.tablet_input.canvas_rect;
+
+                let run_engine = |shell: &mut Self, cmd: &str, cmd_params: &Value, mutating: bool| -> Value {
+                    if mutating && shell.agent_bubble.paused {
+                        shell.agent_bubble.record_activity_with_target(cmd, false, Some(cmd_params), None, canvas_rect);
                         return json!({
                             "jsonrpc": "2.0",
                             "id": id,
                             "error": { "code": -32001, "message": "AI agent is paused by user" }
                         });
                     }
-                    match self.fig.session.execute(cmd, &cmd_params) {
+                    match shell.fig.session.execute(cmd, cmd_params) {
                         Ok(out) => {
-                            self.agent_bubble.record_activity_with_target(cmd, true, Some(&cmd_params), None, canvas_rect);
+                            shell.agent_bubble.record_activity_with_target(cmd, true, Some(cmd_params), None, canvas_rect);
                             json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
@@ -2003,7 +2131,7 @@ impl FigcraftAndroidShell {
                             })
                         }
                         Err(err) => {
-                            self.agent_bubble.record_activity_with_target(cmd, false, Some(&cmd_params), None, canvas_rect);
+                            shell.agent_bubble.record_activity_with_target(cmd, false, Some(cmd_params), None, canvas_rect);
                             json!({
                                 "jsonrpc": "2.0",
                                 "id": id,
@@ -2011,25 +2139,117 @@ impl FigcraftAndroidShell {
                             })
                         }
                     }
-                } else {
-                    let canvas_rect = self.tablet_input.canvas_rect;
-                    self.agent_bubble.record_activity_with_target("figcraft.status", true, None, None, canvas_rect);
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "content": [{
-                                "type": "text",
-                                "text": format!(
-                                    "FigCraft Android V8 active (docs={}, endpoint={}, zoom={}%, mouse={})",
-                                    self.fig.session.docs.len(),
-                                    self.mcp_endpoint_label,
-                                    (self.prefs.ui_zoom_factor * 100.0).round() as i32,
-                                    self.tablet_input.mouse_cursor_mode
-                                )
-                            }]
+                };
+
+                match name {
+                    "engine.execute" => {
+                        let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+                        let cmd_params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+                        let is_read = cmd.starts_with("doc.inspect")
+                            || cmd.starts_with("node.get")
+                            || cmd.starts_with("node.list")
+                            || cmd.starts_with("inspect.")
+                            || cmd.starts_with("template.list")
+                            || cmd.starts_with("page.list")
+                            || cmd.starts_with("style.list");
+                        run_engine(self, cmd, &cmd_params, !is_read)
+                    }
+                    "create_node" => run_engine(self, "node.create", &args, true),
+                    "set_properties" => {
+                        let mut p = args.get("props").cloned().unwrap_or_else(|| json!({}));
+                        if let Some(ids) = args.get("ids") {
+                            if let Some(obj) = p.as_object_mut() {
+                                obj.insert("ids".into(), ids.clone());
+                            }
                         }
-                    })
+                        run_engine(self, "node.set", &p, true)
+                    }
+                    "inspect_document" => run_engine(self, "doc.inspect", &args, false),
+                    "get_node" => run_engine(self, "node.get", &args, false),
+                    "undo" => run_engine(self, "edit.undo", &json!({}), true),
+                    "redo" => run_engine(self, "edit.redo", &json!({}), true),
+                    "new_from_template" => run_engine(self, "file.newFromTemplate", &args, true),
+                    "list_commands" => {
+                        self.agent_bubble.record_activity_with_target("doc.inspect", true, None, None, canvas_rect);
+                        let filter = args.get("filter").and_then(Value::as_str).unwrap_or("").to_ascii_lowercase();
+                        let catalog = [
+                            ("node.create", "Create frame/rectangle/ellipse/text/vector/component {type, name?, x?, y?, width?, height?, parent?, text?, props?}"),
+                            ("node.set", "Update layer properties {ids?, x?, y?, width?, height?, fill?, stroke?, cornerRadius?, opacity?, layout?, padding?, gap?, text?, fontSize?, fontFamily?, fontStyle?}"),
+                            ("node.get", "Inspect one layer {id, depth?}"),
+                            ("node.delete", "Delete layers {ids?}"),
+                            ("node.move", "Move layers {ids?, x, y}"),
+                            ("node.resize", "Resize layers {ids?, width, height}"),
+                            ("doc.inspect", "Inspect full document tree, selection, and styles {depth?, allPages?}"),
+                            ("text.create", "Create text layer {text, x?, y?, fontSize?, fontFamily?, fill?}"),
+                            ("text.set", "Edit text contents {id?, text}"),
+                            ("text.style", "Style text range {id?, start?, end?, fontSize?, fontFamily?, fontStyle?, fill?}"),
+                            ("fill.set", "Set layer fill paint {ids?, color|paint}"),
+                            ("stroke.set", "Set layer stroke {ids?, color?, width?}"),
+                            ("effect.add", "Add dropShadow/innerShadow/layerBlur/backgroundBlur/glass {ids?, type, radius?, offset?, color?}"),
+                            ("layout.add", "Add auto layout to frame {ids?, direction?, gap?, padding?}"),
+                            ("align.left / align.centerH / align.top / align.centerV", "Align selected layers {ids?}"),
+                            ("distribute.horizontal / distribute.vertical", "Distribute selected layers evenly {ids?}"),
+                            ("component.create", "Turn layers into a component {ids?}"),
+                            ("instance.create", "Place component instance {component, x?, y?}"),
+                            ("image.place", "Place image on canvas {path|data, name?, x?, y?}"),
+                            ("file.newFromTemplate", "Create starter template {template: mobile-app|landing-page|dashboard|design-system|wireframe-kit|social-posts|slides|icon-set, name?}"),
+                            ("template.list", "List available starter templates {}"),
+                            ("view.zoomToFit", "Zoom viewport to fit page {}"),
+                            ("edit.undo / edit.redo", "Undo or redo last edit step {}"),
+                            ("edit.duplicate / edit.delete", "Duplicate or delete selection {}"),
+                            ("select.set", "Select layer ids {ids: [...]}"),
+                            ("object.group / object.ungroup", "Group or ungroup layers {ids?}"),
+                        ];
+                        let lines: Vec<String> = catalog
+                            .iter()
+                            .filter(|(k, d)| {
+                                filter.is_empty()
+                                    || k.to_ascii_lowercase().contains(&filter)
+                                    || d.to_ascii_lowercase().contains(&filter)
+                            })
+                            .map(|(k, d)| format!("- {k}: {d}"))
+                            .collect();
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!("FigCraft Mobile MCP Commands ({} matched):
+{}", lines.len(), lines.join("
+"))
+                                }]
+                            }
+                        })
+                    }
+                    _ => {
+                        self.agent_bubble.record_activity_with_target("figcraft.status", true, None, None, canvas_rect);
+                        let active_doc_name = self
+                            .fig
+                            .session
+                            .docs
+                            .get(self.fig.session.active)
+                            .map(|d| d.doc.name.as_str())
+                            .unwrap_or("(none)");
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{
+                                    "type": "text",
+                                    "text": format!(
+                                        "FigCraft Mobile v29 active (active_doc="{}", docs={}, local={}, https_tunnel="{}", paused={}, mouse={})",
+                                        active_doc_name,
+                                        self.fig.session.docs.len(),
+                                        self.mcp_endpoint_label,
+                                        if self.tunnel_url.is_empty() { "off" } else { self.tunnel_url.as_str() },
+                                        self.agent_bubble.paused,
+                                        self.tablet_input.mouse_cursor_mode
+                                    )
+                                }]
+                            }
+                        })
+                    }
                 }
             }
             _ => json!({
