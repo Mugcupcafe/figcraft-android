@@ -13,6 +13,7 @@ mod imp {
     use std::sync::RwLock;
 
     struct AndroidBridge {
+        app: AndroidApp,
         vm: JavaVM,
         activity: GlobalRef,
     }
@@ -33,6 +34,7 @@ mod imp {
 
         if let Ok(mut guard) = BRIDGE.write() {
             *guard = Some(AndroidBridge {
+                app: app.clone(),
                 vm,
                 activity: global_ref,
             });
@@ -106,6 +108,38 @@ mod imp {
         }
         events
     }
+
+    pub fn game_show_soft_input(show: bool) {
+        let Ok(guard) = BRIDGE.read() else { return; };
+        let Some(bridge) = guard.as_ref() else { return; };
+        if show {
+            bridge.app.set_text_input_state(android_activity::input::TextInputState {
+                text: " ".to_owned(),
+                selection: android_activity::input::TextSpan { start: 1, end: 1 },
+                compose_region: None,
+            });
+            bridge.app.show_soft_input(true);
+        } else {
+            bridge.app.hide_soft_input(false);
+        }
+    }
+
+    pub fn game_reset_text_input() {
+        let Ok(guard) = BRIDGE.read() else { return; };
+        let Some(bridge) = guard.as_ref() else { return; };
+        bridge.app.set_text_input_state(android_activity::input::TextInputState {
+            text: " ".to_owned(),
+            selection: android_activity::input::TextSpan { start: 1, end: 1 },
+            compose_region: None,
+        });
+    }
+
+    pub fn game_poll_text_input() -> Option<(String, Option<(usize, usize)>)> {
+        let Ok(guard) = BRIDGE.read() else { return None; };
+        let Some(bridge) = guard.as_ref() else { return None; };
+        let st = bridge.app.text_input_state();
+        Some((st.text, st.compose_region.map(|r| (r.start, r.end))))
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -118,6 +152,12 @@ mod imp {
 
     pub fn poll_events() -> Vec<ActivityEvent> {
         Vec::new()
+    }
+
+    pub fn game_show_soft_input(_show: bool) {}
+    pub fn game_reset_text_input() {}
+    pub fn game_poll_text_input() -> Option<(String, Option<(usize, usize)>)> {
+        None
     }
 }
 
@@ -132,4 +172,16 @@ pub fn call_activity(cmd: &str, arg: &str) -> BridgeReply {
 
 pub fn poll_activity_events() -> Vec<ActivityEvent> {
     imp::poll_events()
+}
+
+pub fn game_show_soft_input(show: bool) {
+    imp::game_show_soft_input(show);
+}
+
+pub fn game_reset_text_input() {
+    imp::game_reset_text_input();
+}
+
+pub fn game_poll_text_input() -> Option<(String, Option<(usize, usize)>)> {
+    imp::game_poll_text_input()
 }
