@@ -35,6 +35,7 @@ enum LoadedAsset {
         bytes: Vec<u8>,
     },
     Image {
+        staged_path: String,
         display_name: String,
         mime: String,
         bytes: Vec<u8>,
@@ -123,6 +124,10 @@ pub struct FigcraftAndroidShell {
     pending_paste_text: Option<String>,
     pasted_png: Arc<Mutex<Option<Vec<u8>>>>,
     drive_window_open: bool,
+    drive_window_anchor: Option<egui::Pos2>,
+    drive_window_open_seq: u64,
+    toolbar_editor_anchor: Option<egui::Pos2>,
+    toolbar_editor_open_seq: u64,
     drive_signed_in: bool,
     drive_email: String,
     drive_status: String,
@@ -143,6 +148,9 @@ pub struct FigcraftAndroidShell {
     pending_egui_events: Vec<egui::Event>,
     last_wants_keyboard: bool,
     ime_composing: bool,
+    game_ime_active: bool,
+    game_ime_committed_bytes: usize,
+    game_ime_last_composing: String,
     last_recovery_stamps: Vec<(u64, Vec<u64>)>,
     last_recovery_save: std::time::Instant,
 }
@@ -246,6 +254,10 @@ impl FigcraftAndroidShell {
             pending_paste_text: None,
             pasted_png,
             drive_window_open: false,
+            drive_window_anchor: None,
+            drive_window_open_seq: 0,
+            toolbar_editor_anchor: None,
+            toolbar_editor_open_seq: 0,
             drive_signed_in: false,
             drive_email: String::new(),
             drive_status: String::new(),
@@ -266,6 +278,9 @@ impl FigcraftAndroidShell {
             pending_egui_events: Vec::new(),
             last_wants_keyboard: false,
             ime_composing: false,
+            game_ime_active: false,
+            game_ime_committed_bytes: 1,
+            game_ime_last_composing: String::new(),
             last_recovery_stamps: Vec::new(),
             last_recovery_save: std::time::Instant::now(),
         }
@@ -552,12 +567,35 @@ impl FigcraftAndroidShell {
                     let _ = self.services.request_pick_ui_font();
                 }
             }
+            ToolbarButtonId::TextInput => {
+                if ui.add(egui::Button::new("텍스트입력").min_size(egui::vec2(76.0, h))).clicked() {
+                    self.restore_focus_before_paste = true;
+                    self.services.prompt_text_input("");
+                }
+            }
+            ToolbarButtonId::RenameCanvas => {
+                if ui.add(egui::Button::new("이름변경").min_size(egui::vec2(68.0, h))).clicked() {
+                    let cur = self
+                        .fig
+                        .session
+                        .docs
+                        .get(self.fig.session.active)
+                        .map(|d| d.doc.name.clone())
+                        .unwrap_or_else(|| "Untitled".into());
+                    self.services.prompt_rename_canvas(&cur);
+                }
+            }
             ToolbarButtonId::Drive => {
                 let label = if self.drive_signed_in { "드라이브 ●" } else { "드라이브" };
-                if ui.add(egui::Button::new(label).min_size(egui::vec2(72.0, h))).clicked() {
+                let resp = ui.add(egui::Button::new(label).min_size(egui::vec2(72.0, h)));
+                if resp.clicked() {
                     self.drive_window_open = !self.drive_window_open;
-                    if self.drive_window_open && self.drive_signed_in {
-                        self.services.drive_sync_now();
+                    if self.drive_window_open {
+                        self.drive_window_anchor = Some(egui::pos2(resp.rect.left(), resp.rect.bottom() + 6.0));
+                        self.drive_window_open_seq = self.drive_window_open_seq.wrapping_add(1);
+                        if self.drive_signed_in {
+                            self.services.drive_sync_now();
+                        }
                     }
                 }
             }
@@ -591,40 +629,106 @@ impl FigcraftAndroidShell {
         }
     }
 
+    fn clamped_popup_pos(ctx: &egui::Context, anchor: Option<egui::Pos2>, win_w: f32, win_h: f32) -> egui::Pos2 {
+        let screen = ctx.input(|i| i.viewport_rect());
+        let raw = anchor.unwrap_or_else(|| egui::pos2(screen.center().x - win_w * 0.5, screen.top() + 64.0));
+        let min_x = screen.left() + 8.0;
+        let max_x = (screen.right() - win_w - 8.0).max(min_x);
+        let min_y = screen.top() + 8.0;
+        let max_y = (screen.bottom() - win_h - 8.0).max(min_y);
+        egui::pos2(raw.x.clamp(min_x, max_x), raw.y.clamp(min_y, max_y))
+    }
+
     fn show_toolbar_editor_window(&mut self, ctx: &egui::Context) {
         if !self.show_toolbar_editor {
             return;
         }
         let mut open = self.show_toolbar_editor;
         let mut changed = false;
+        let pos = Self::clamped_popup_pos(ctx, self.toolbar_editor_anchor, 380.0, 440.0);
 
         egui::Window::new("상단바 버튼 편집")
+            .id(egui::Id::new(("toolbar_editor_win", self.toolbar_editor_open_seq)))
+            .default_pos(pos)
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_width(360.0)
+            .default_width(380.0)
             .show(ctx, |ui| {
-                ui.label("표시 중인 버튼 (◀/▶ 순서 이동 · ✕ 숨기기)");
+                ui.label(egui::RichText::new("좌측 고정 영역 (스크롤해도 항상 고정)").strong());
+                ui.add_space(4.0);
+
+                let mut pin_left: Option<usize> = None;
+                let mut pin_right: Option<usize> = None;
+                let mut unpin_idx: Option<usize> = None;
+                let mut pin_remove: Option<usize> = None;
+
+                if self.prefs.pinned_toolbar_buttons.is_empty() {
+                    ui.label(egui::RichText::new("고정된 버튼이 없습니다. 아래에서 '고정'을 눌러 추가하세요.").size(11.5).weak());
+                } else {
+                    let plen = self.prefs.pinned_toolbar_buttons.len();
+                    for (idx, btn) in self.prefs.pinned_toolbar_buttons.iter().copied().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(idx > 0, egui::Button::new("◀").min_size(egui::vec2(28.0, 26.0))).clicked() {
+                                pin_left = Some(idx);
+                            }
+                            if ui.add_enabled(idx + 1 < plen, egui::Button::new("▶").min_size(egui::vec2(28.0, 26.0))).clicked() {
+                                pin_right = Some(idx);
+                            }
+                            ui.label(btn.display_name());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(egui::Button::new("✕").min_size(egui::vec2(26.0, 26.0))).clicked() {
+                                    pin_remove = Some(idx);
+                                }
+                                if ui.add(egui::Button::new("해제").min_size(egui::vec2(44.0, 26.0))).clicked() {
+                                    unpin_idx = Some(idx);
+                                }
+                            });
+                        });
+                    }
+                }
+
+                if let Some(i) = pin_left {
+                    self.prefs.pinned_toolbar_buttons.swap(i - 1, i);
+                    changed = true;
+                } else if let Some(i) = pin_right {
+                    self.prefs.pinned_toolbar_buttons.swap(i, i + 1);
+                    changed = true;
+                } else if let Some(i) = unpin_idx {
+                    let b = self.prefs.pinned_toolbar_buttons.remove(i);
+                    self.prefs.toolbar_buttons.insert(0, b);
+                    changed = true;
+                } else if let Some(i) = pin_remove {
+                    self.prefs.pinned_toolbar_buttons.remove(i);
+                    changed = true;
+                }
+
+                ui.separator();
+                ui.label(egui::RichText::new("스크롤 영역 (◀/▶ 순서 이동 · 고정 · ✕ 숨기기)").strong());
                 ui.add_space(4.0);
 
                 let mut move_left: Option<usize> = None;
                 let mut move_right: Option<usize> = None;
+                let mut pin_from_scroll: Option<usize> = None;
                 let mut remove_idx: Option<usize> = None;
 
-                egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
                     let len = self.prefs.toolbar_buttons.len();
                     for (idx, btn) in self.prefs.toolbar_buttons.iter().copied().enumerate() {
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(idx > 0, egui::Button::new("◀").min_size(egui::vec2(30.0, 28.0))).clicked() {
+                            if ui.add_enabled(idx > 0, egui::Button::new("◀").min_size(egui::vec2(28.0, 26.0))).clicked() {
                                 move_left = Some(idx);
                             }
-                            if ui.add_enabled(idx + 1 < len, egui::Button::new("▶").min_size(egui::vec2(30.0, 28.0))).clicked() {
+                            if ui.add_enabled(idx + 1 < len, egui::Button::new("▶").min_size(egui::vec2(28.0, 26.0))).clicked() {
                                 move_right = Some(idx);
                             }
                             ui.label(btn.display_name());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(egui::Button::new("✕").min_size(egui::vec2(28.0, 28.0))).clicked() {
+                                if ui.add(egui::Button::new("✕").min_size(egui::vec2(26.0, 26.0))).clicked() {
                                     remove_idx = Some(idx);
+                                }
+                                if ui.add(egui::Button::new("고정").min_size(egui::vec2(44.0, 26.0))).clicked() {
+                                    pin_from_scroll = Some(idx);
                                 }
                             });
                         });
@@ -637,6 +741,10 @@ impl FigcraftAndroidShell {
                 } else if let Some(i) = move_right {
                     self.prefs.toolbar_buttons.swap(i, i + 1);
                     changed = true;
+                } else if let Some(i) = pin_from_scroll {
+                    let b = self.prefs.toolbar_buttons.remove(i);
+                    self.prefs.pinned_toolbar_buttons.push(b);
+                    changed = true;
                 } else if let Some(i) = remove_idx {
                     self.prefs.toolbar_buttons.remove(i);
                     changed = true;
@@ -647,7 +755,9 @@ impl FigcraftAndroidShell {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     for &btn in ToolbarButtonId::ALL {
-                        if !self.prefs.toolbar_buttons.contains(&btn) {
+                        if !self.prefs.toolbar_buttons.contains(&btn)
+                            && !self.prefs.pinned_toolbar_buttons.contains(&btn)
+                        {
                             if ui
                                 .add(egui::Button::new(format!("+ {}", btn.display_name())).min_size(egui::vec2(64.0, 32.0)))
                                 .clicked()
@@ -662,6 +772,7 @@ impl FigcraftAndroidShell {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("기본값 복원").clicked() {
+                        self.prefs.pinned_toolbar_buttons.clear();
                         self.prefs.toolbar_buttons = ToolbarButtonId::default_bar();
                         changed = true;
                     }
@@ -672,18 +783,6 @@ impl FigcraftAndroidShell {
             self.services.save_prefs(&self.prefs);
         }
         self.show_toolbar_editor = open;
-    }
-
-    fn toggle_mouse_mode(&mut self) {
-        self.tablet_input.mouse_cursor_mode = !self.tablet_input.mouse_cursor_mode;
-        if self.tablet_input.mouse_cursor_mode {
-            self.tablet_input.center_virtual_cursor();
-        }
-        self.status_banner = Some(if self.tablet_input.mouse_cursor_mode {
-            "마우스 켜짐 (우하단 원: 탭=클릭 · 길게=우클릭 · 드래그=이동 · 마우스버튼 길게=설정)".into()
-        } else {
-            "마우스 꺼짐".into()
-        });
     }
 
     fn show_mouse_settings_window(&mut self, ctx: &egui::Context) {
@@ -808,17 +907,20 @@ impl FigcraftAndroidShell {
             .name("figcraft-img-read".into())
             .spawn(move || {
                 let res = std::fs::read(&staged_path);
-                let _ = std::fs::remove_file(&staged_path);
                 let msg = match res {
                     Ok(bytes) => LoadedAsset::Image {
+                        staged_path,
                         display_name,
                         mime,
                         bytes,
                     },
-                    Err(err) => LoadedAsset::Err {
-                        display_name,
-                        error: err.to_string(),
-                    },
+                    Err(err) => {
+                        let _ = std::fs::remove_file(&staged_path);
+                        LoadedAsset::Err {
+                            display_name,
+                            error: err.to_string(),
+                        }
+                    }
                 };
                 let _ = tx.send(msg);
             });
@@ -961,6 +1063,27 @@ impl FigcraftAndroidShell {
                         self.status_banner = Some(msg);
                     }
                 }
+                ActivityEvent::DriveCreds { client_id, client_secret } => {
+                    self.prefs.drive_client_id = client_id;
+                    self.prefs.drive_client_secret = client_secret;
+                    self.services.save_prefs(&self.prefs);
+                    self.drive_status = "JSON 불러오기 완료! 'Google 로그인'을 눌러 연결하세요.".into();
+                }
+                ActivityEvent::NativeText(text) => {
+                    self.pending_paste_text = Some(text);
+                    self.status_banner = Some("텍스트 입력 완료".into());
+                }
+                ActivityEvent::RenameCanvas(new_name) => {
+                    let mut renamed = false;
+                    if let Some(doc_state) = self.fig.session.docs.get_mut(self.fig.session.active) {
+                        doc_state.doc.name = new_name.clone();
+                        renamed = true;
+                    }
+                    if renamed {
+                        self.status_banner = Some(format!("캔버스 이름 변경: {new_name}"));
+                        self.save_recovery_snapshots(true);
+                    }
+                }
             }
         }
 
@@ -979,19 +1102,23 @@ impl FigcraftAndroidShell {
                     self.status_banner = Some(format!("Opened {display_name} ({kb} KB)"));
                 }
                 LoadedAsset::Image {
+                    staged_path,
                     display_name,
                     mime,
                     bytes,
                 } => {
                     let kb = bytes.len() / 1024;
-                    if let Ok(mut slot) = self.pasted_png.lock() {
-                        *slot = Some(bytes);
+                    let b64 = crate::services::encode_base64(&bytes);
+                    let placed_by_data = self
+                        .fig
+                        .session
+                        .execute("image.place", &json!({ "data": b64, "name": display_name }))
+                        .is_ok();
+                    if !placed_by_data {
+                        self.fig.run("image.place", json!({ "path": staged_path, "name": display_name }));
                     }
-                    self.fig.run("edit.paste", json!({}));
-                    if let Ok(mut slot) = self.pasted_png.lock() {
-                        *slot = None;
-                    }
-                    self.status_banner = Some(format!("Imported {display_name} ({mime}, {kb} KB)"));
+                    let _ = std::fs::remove_file(&staged_path);
+                    self.status_banner = Some(format!("이미지 배치 완료: {display_name} ({mime}, {kb} KB)"));
                 }
                 LoadedAsset::Err {
                     display_name,
@@ -1137,40 +1264,75 @@ impl FigcraftAndroidShell {
     fn show_home_drive_strip(&mut self, ui: &mut egui::Ui) {
         let mut open_req: Option<(String, String)> = None;
         let mut open_page = false;
+        let mut do_sync = false;
         egui::Panel::bottom("android_home_drive_recents")
             .resizable(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Google Drive 최근 캔버스").strong().size(13.0));
+                    let title_lbl = if self.drive_signed_in {
+                        if self.drive_email.is_empty() {
+                            "Google Drive (FigCraft 폴더 · 연결됨)".to_string()
+                        } else {
+                            format!("Google Drive ({})", self.drive_email)
+                        }
+                    } else {
+                        "Google Drive (FigCraft 폴더)".to_string()
+                    };
+                    ui.label(egui::RichText::new(title_lbl).strong().size(13.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Google Drive 페이지 열기").clicked() {
+                        let btn_label = if self.drive_signed_in {
+                            "Google Drive 페이지 열기"
+                        } else {
+                            "Google Drive 연결 / 설정"
+                        };
+                        let hbtn = ui.button(btn_label);
+                        if hbtn.clicked() {
                             open_page = true;
+                            self.drive_window_anchor = Some(egui::pos2(hbtn.rect.left() - 360.0, hbtn.rect.top() - 510.0));
+                            self.drive_window_open_seq = self.drive_window_open_seq.wrapping_add(1);
+                        }
+                        if self.drive_signed_in && ui.button("새로고침").clicked() {
+                            do_sync = true;
                         }
                     });
                 });
-                ui.add_space(4.0);
+
                 let items = self.drive_items.clone();
-                egui::ScrollArea::horizontal().show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for item in items.iter().take(12) {
-                            let title = item.name.strip_suffix(".figcraft").unwrap_or(&item.name);
-                            egui::Frame::group(ui.style())
-                                .inner_margin(egui::Margin::same(8))
-                                .show(ui, |ui| {
-                                    ui.set_width(148.0);
-                                    Self::paint_canvas_card_preview(ui, egui::vec2(132.0, 66.0), title, item.synced);
-                                    ui.add_space(4.0);
-                                    ui.label(egui::RichText::new(title).strong().size(12.5));
-                                    if ui.small_button("열기").clicked() {
-                                        open_req = Some((item.file_id.clone(), item.name.clone()));
-                                    }
-                                });
-                        }
+                if items.is_empty() {
+                    ui.add_space(2.0);
+                    let hint = if self.drive_signed_in {
+                        "아직 동기화된 캔버스가 없습니다. 캔버스를 편집하거나 'Google Drive 페이지 열기'에서 업로드하세요."
+                    } else {
+                        "오른쪽 'Google Drive 연결 / 설정'에서 다운로드한 JSON 파일을 불러와 로그인하면 캔버스가 자동 동기화됩니다."
+                    };
+                    ui.label(egui::RichText::new(hint).size(11.5).weak());
+                } else {
+                    ui.add_space(4.0);
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for item in items.iter().take(12) {
+                                let title = item.name.strip_suffix(".figcraft").unwrap_or(&item.name);
+                                egui::Frame::group(ui.style())
+                                    .inner_margin(egui::Margin::same(8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(148.0);
+                                        Self::paint_canvas_card_preview(ui, egui::vec2(132.0, 62.0), title, item.synced);
+                                        ui.add_space(4.0);
+                                        ui.label(egui::RichText::new(title).strong().size(12.5));
+                                        if ui.small_button("열기").clicked() {
+                                            open_req = Some((item.file_id.clone(), item.name.clone()));
+                                        }
+                                    });
+                            }
+                        });
                     });
-                });
+                }
             });
         if open_page {
             self.drive_window_open = true;
+        }
+        if do_sync {
+            self.services.drive_sync_now();
         }
         if let Some((fid, name)) = open_req {
             self.services.drive_open_file(&fid, &name);
@@ -1183,36 +1345,70 @@ impl FigcraftAndroidShell {
             return;
         }
         let mut open = self.drive_window_open;
+        let mut do_pick_json = false;
+        let mut do_open_console = false;
         let mut do_sign_in = false;
         let mut do_sign_out = false;
         let mut do_sync = false;
         let mut do_upload = false;
+        let mut do_rename = false;
         let mut prefs_changed = false;
         let mut open_req: Option<(String, String)> = None;
 
+        let drive_pos = Self::clamped_popup_pos(ctx, self.drive_window_anchor, 540.0, 500.0);
         egui::Window::new("Google Drive (FigCraft 폴더)")
+            .id(egui::Id::new(("drive_sync_win", self.drive_window_open_seq)))
+            .default_pos(drive_pos)
             .open(&mut open)
             .resizable(true)
-            .default_width(520.0)
-            .default_height(460.0)
+            .default_width(540.0)
+            .default_height(500.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if self.drive_signed_in {
+                if self.drive_signed_in {
+                    ui.horizontal(|ui| {
                         let who = if self.drive_email.is_empty() { "연결됨".to_string() } else { self.drive_email.clone() };
                         ui.label(egui::RichText::new(format!("계정: {who}")).strong());
                         if ui.button("로그아웃").clicked() {
                             do_sign_out = true;
                         }
-                    } else {
-                        ui.label("OAuth Client ID:");
-                        if ui.add(egui::TextEdit::singleline(&mut self.prefs.drive_client_id).desired_width(240.0).hint_text("xxxx.apps.googleusercontent.com")).changed() {
-                            prefs_changed = true;
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        if ui.button("JSON 파일 불러오기 (추천)").clicked() {
+                            do_pick_json = true;
                         }
                         if ui.button("Google 로그인").clicked() {
                             do_sign_in = true;
                         }
-                    }
-                });
+                        if ui.button("Google Cloud 열기").clicked() {
+                            do_open_console = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Client ID:");
+                        if ui.add(egui::TextEdit::singleline(&mut self.prefs.drive_client_id).desired_width(360.0).hint_text("JSON 불러오기로 자동 입력")).changed() {
+                            prefs_changed = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Client Secret:");
+                        if ui.add(egui::TextEdit::singleline(&mut self.prefs.drive_client_secret).password(true).desired_width(340.0).hint_text("JSON 불러오기로 자동 입력")).changed() {
+                            prefs_changed = true;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    egui::CollapsingHeader::new("처음 설정하는 방법 (3분 튜토리얼)")
+                        .default_open(self.prefs.drive_client_id.is_empty())
+                        .show(ui, |ui| {
+                            ui.label("1. 위 'Google Cloud 열기'에서 프로젝트를 만들고 Google Drive API를 '사용'으로 켭니다.");
+                            ui.label("2. Google 인증 플랫폼 → 대상(외부) → 테스트 사용자에 본인 구글 이메일을 추가합니다.");
+                            ui.label("3. 클라이언트 → 만들기 → '데스크톱 앱' 선택 (AI 에이전트 체크 안 함) → JSON 다운로드.");
+                            ui.label("4. 위 'JSON 파일 불러오기'로 받은 파일을 선택하면 ID/비밀번호가 자동 입력됩니다.");
+                            ui.label("5. 'Google 로그인'을 눌러 브라우저에서 승인하면 FigCraft 폴더가 자동 생성·동기화됩니다.");
+                        });
+                }
+
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.checkbox(&mut self.prefs.drive_auto_sync, "자동 업로드 및 동기화 (FigCraft 폴더)").changed() {
@@ -1224,6 +1420,9 @@ impl FigcraftAndroidShell {
                         }
                         if ui.button("현재 캔버스 업로드").clicked() {
                             do_upload = true;
+                        }
+                        if ui.button("캔버스 이름 변경").clicked() {
+                            do_rename = true;
                         }
                     }
                 });
@@ -1265,9 +1464,15 @@ impl FigcraftAndroidShell {
         if prefs_changed {
             self.services.save_prefs(&self.prefs);
         }
+        if do_pick_json {
+            self.services.pick_drive_json();
+        }
+        if do_open_console {
+            self.services.open_url("https://console.cloud.google.com/auth/clients");
+        }
         if do_sign_in {
             self.services.save_prefs(&self.prefs);
-            self.services.drive_sign_in(&self.prefs.drive_client_id);
+            self.services.drive_sign_in(&self.prefs.drive_client_id, &self.prefs.drive_client_secret);
         }
         if do_sign_out {
             self.services.drive_sign_out();
@@ -1278,6 +1483,16 @@ impl FigcraftAndroidShell {
         if do_upload {
             self.upload_active_canvas_to_drive();
         }
+        if do_rename {
+            let cur = self
+                .fig
+                .session
+                .docs
+                .get(self.fig.session.active)
+                .map(|d| d.doc.name.clone())
+                .unwrap_or_else(|| "Untitled".into());
+            self.services.prompt_rename_canvas(&cur);
+        }
         if let Some((fid, name)) = open_req {
             self.services.drive_open_file(&fid, &name);
             self.drive_window_open = false;
@@ -1285,6 +1500,85 @@ impl FigcraftAndroidShell {
         }
     }
 
+    fn poll_game_text_input(&mut self) {
+        if !self.game_ime_active {
+            return;
+        }
+        let Some((text, compose_region)) = platform::game_poll_text_input() else {
+            return;
+        };
+
+        // Backspace deleted past our committed boundary (including sentinel space)
+        if text.len() < self.game_ime_committed_bytes {
+            if !self.game_ime_last_composing.is_empty() {
+                self.game_ime_last_composing.clear();
+                self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: String::new(),
+                    active_range_chars: None,
+                }));
+            } else {
+                self.queue_key_shortcut(egui::Key::Backspace, false, false);
+            }
+            self.game_ime_committed_bytes = 1;
+            platform::game_reset_text_input();
+            return;
+        }
+
+        if let Some((cs_raw, ce_raw)) = compose_region {
+            let cs = cs_raw.min(text.len());
+            let ce = ce_raw.min(text.len());
+            if cs <= ce && text.is_char_boundary(cs) && text.is_char_boundary(ce) {
+                if cs > self.game_ime_committed_bytes && text.is_char_boundary(self.game_ime_committed_bytes) {
+                    let committed = text[self.game_ime_committed_bytes..cs].to_owned();
+                    if !committed.is_empty() {
+                        if !self.game_ime_last_composing.is_empty() {
+                            self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(committed)));
+                            self.game_ime_last_composing.clear();
+                        } else {
+                            self.pending_egui_events.push(egui::Event::Text(committed));
+                        }
+                    }
+                    self.game_ime_committed_bytes = cs;
+                }
+                let comp = &text[cs..ce];
+                if comp != self.game_ime_last_composing {
+                    self.game_ime_last_composing = comp.to_owned();
+                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                        text: self.game_ime_last_composing.clone(),
+                        active_range_chars: None,
+                    }));
+                }
+                return;
+            }
+        }
+
+        // No active composition: commit any text appended after committed_bytes
+        if text.len() > self.game_ime_committed_bytes && text.is_char_boundary(self.game_ime_committed_bytes) {
+            let newly = text[self.game_ime_committed_bytes..].to_owned();
+            if newly == "\n" || newly == "\r\n" {
+                if !self.game_ime_last_composing.is_empty() {
+                    let c = std::mem::take(&mut self.game_ime_last_composing);
+                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(c)));
+                }
+                self.queue_key_shortcut(egui::Key::Enter, false, false);
+            } else if !newly.is_empty() {
+                if !self.game_ime_last_composing.is_empty() {
+                    self.game_ime_last_composing.clear();
+                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(newly)));
+                } else {
+                    self.pending_egui_events.push(egui::Event::Text(newly));
+                }
+            }
+            self.game_ime_committed_bytes = 1;
+            platform::game_reset_text_input();
+        } else if !self.game_ime_last_composing.is_empty() {
+            self.game_ime_last_composing.clear();
+            self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
+                text: String::new(),
+                active_range_chars: None,
+            }));
+        }
+    }
 }
 
 impl eframe::App for FigcraftAndroidShell {
@@ -1311,6 +1605,7 @@ impl eframe::App for FigcraftAndroidShell {
         raw_input.events.extend(control_events);
 
         self.drain_activity_events();
+        self.poll_game_text_input();
 
         if !self.pending_egui_events.is_empty() {
             raw_input.events.extend(self.pending_egui_events.drain(..));
@@ -1335,10 +1630,6 @@ impl eframe::App for FigcraftAndroidShell {
         self.tablet_input.screen_rect = ctx.input(|i| i.viewport_rect());
 
         let wants_kb = ctx.egui_wants_keyboard_input();
-        if wants_kb != self.last_wants_keyboard {
-            self.last_wants_keyboard = wants_kb;
-            self.services.set_soft_keyboard(wants_kb);
-        }
         if !self.restore_focus_before_paste && wants_kb {
             if let Some(focused) = ctx.memory(|m| m.focused()) {
                 self.last_focused_id = Some(focused);
@@ -1363,33 +1654,55 @@ impl eframe::App for FigcraftAndroidShell {
         let top_btn_h = 44.0;
         let top_resp = egui::Panel::top("figcraft_android_topbar").show(ui, |ui| {
             ui.add_space(top_inset + 3.0);
-            egui::ScrollArea::horizontal()
-                .id_salt("topbar_scroll")
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 7.0;
-                        ui.add_space(left_inset);
-                        let buttons = self.prefs.toolbar_buttons.clone();
-                        for btn_id in buttons {
-                            self.render_toolbar_button(ui, &ctx, btn_id, top_btn_h);
-                        }
-                        if ui
-                            .add(
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 7.0;
+                ui.add_space(left_inset);
+
+                let pinned = self.prefs.pinned_toolbar_buttons.clone();
+                if !pinned.is_empty() {
+                    for btn_id in pinned {
+                        self.render_toolbar_button(ui, &ctx, btn_id, top_btn_h);
+                    }
+                    let (sep_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, top_btn_h), egui::Sense::hover());
+                    let sx = sep_rect.center().x;
+                    ui.painter().line_segment(
+                        [egui::pos2(sx, sep_rect.top() + 6.0), egui::pos2(sx, sep_rect.bottom() - 6.0)],
+                        egui::Stroke::new(1.5, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                    );
+                }
+
+                egui::ScrollArea::horizontal()
+                    .id_salt("topbar_scroll")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 7.0;
+                            let buttons = self.prefs.toolbar_buttons.clone();
+                            for btn_id in buttons {
+                                self.render_toolbar_button(ui, &ctx, btn_id, top_btn_h);
+                            }
+                            let plus_resp = ui.add(
                                 egui::Button::new("+")
                                     .selected(self.show_toolbar_editor)
                                     .min_size(egui::vec2(42.0, top_btn_h)),
-                            )
-                            .clicked()
-                        {
-                            self.show_toolbar_editor = !self.show_toolbar_editor;
-                        }
-                        if let Some(msg) = &self.status_banner {
-                            ui.label(msg);
-                        }
-                        ui.add_space(right_inset);
+                            );
+                            if plus_resp.clicked() {
+                                self.show_toolbar_editor = !self.show_toolbar_editor;
+                                if self.show_toolbar_editor {
+                                    self.toolbar_editor_anchor = Some(egui::pos2(
+                                        plus_resp.rect.left(),
+                                        plus_resp.rect.bottom() + 6.0,
+                                    ));
+                                    self.toolbar_editor_open_seq = self.toolbar_editor_open_seq.wrapping_add(1);
+                                }
+                            }
+                            if let Some(msg) = &self.status_banner {
+                                ui.label(msg);
+                            }
+                            ui.add_space(right_inset);
+                        });
+                        ui.add_space(6.0);
                     });
-                    ui.add_space(6.0);
-                });
+            });
         });
         self.tablet_input.top_bar_bottom_pt = top_resp.response.rect.bottom();
 
@@ -1432,19 +1745,23 @@ impl eframe::App for FigcraftAndroidShell {
             self.toggle_mouse_mode();
         }
         if pad_actions.toggle_ime {
-            let show = self.tablet_input.ime_height_px <= 1.0;
-            if show {
-                if let Some(id) = self.last_focused_id {
-                    ctx.memory_mut(|m| m.request_focus(id));
-                }
-            }
-            self.services.set_soft_keyboard(show);
+            self.restore_focus_before_paste = true;
+            self.services.prompt_text_input("");
+        }
+
+        let wants_kb_now = ctx.egui_wants_keyboard_input() || ctx.output(|o| o.ime.is_some());
+        if wants_kb_now != self.last_wants_keyboard {
+            self.last_wants_keyboard = wants_kb_now;
+            self.game_ime_active = wants_kb_now;
+            self.game_ime_committed_bytes = 1;
+            self.game_ime_last_composing.clear();
+            platform::game_show_soft_input(wants_kb_now);
         }
 
         self.show_toolbar_editor_window(&ctx);
         self.show_mouse_settings_window(&ctx);
         self.show_drive_window(&ctx);
-        if self.fig.ui.home && !self.drive_items.is_empty() {
+        if self.fig.ui.home {
             self.show_home_drive_strip(ui);
         }
         self.tablet_input.paint_virtual_cursor(&ctx);
@@ -1452,6 +1769,7 @@ impl eframe::App for FigcraftAndroidShell {
         if self.tablet_input.needs_repaint()
             || self.pending_paste_text.is_some()
             || !self.pending_egui_events.is_empty()
+            || self.game_ime_active
             || self.mcp_server.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(40));
