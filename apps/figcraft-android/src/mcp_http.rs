@@ -23,16 +23,29 @@ pub struct McpServerConfig {
     pub max_body_bytes: usize,
 }
 
-impl Default for McpServerConfig {
-    fn default() -> Self {
-        let token = generate_session_token();
-        let suffix = token.get(3..19).unwrap_or(&token);
+impl McpServerConfig {
+    pub fn with_token(bind_addr: SocketAddr, bearer_token: String) -> Self {
+        let tok = if bearer_token.trim().is_empty() {
+            generate_session_token()
+        } else {
+            bearer_token.trim().to_owned()
+        };
+        let suffix = tok.get(3..19).unwrap_or(&tok);
         Self {
-            bind_addr: "127.0.0.1:47800".parse().expect("valid loopback addr"),
+            bind_addr,
             session_id: format!("sess-{suffix}"),
-            bearer_token: token,
+            bearer_token: tok,
             max_body_bytes: 16 * 1024 * 1024,
         }
+    }
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self::with_token(
+            "127.0.0.1:47800".parse().expect("valid loopback addr"),
+            generate_session_token(),
+        )
     }
 }
 
@@ -317,7 +330,7 @@ fn write_http(stream: &mut TcpStream, status: &str, content_type: &str, session_
     let _ = stream.flush();
 }
 
-fn generate_session_token() -> String {
+pub fn generate_session_token() -> String {
     let mut bytes = [0u8; 16];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         if f.read_exact(&mut bytes).is_ok() {
