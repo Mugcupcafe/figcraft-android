@@ -920,7 +920,7 @@ impl FigcraftAndroidShell {
                         self.regenerate_mcp_token();
                     }
                 });
-                ui.weak("토큰은 앱 재실행·Wi-Fi 전환 후에도 고정 유지됩니다.");
+                ui.weak("토큰은 앱 재실행·Wi-Fi 전환 후에도 고정 유지되며, Gemini 웹/앱용 표준 OAuth 2.1도 자동 지원됩니다.");
 
                 ui.add_space(6.0);
                 ui.separator();
