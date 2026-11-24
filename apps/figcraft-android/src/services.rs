@@ -27,6 +27,8 @@ pub enum ToolbarButtonId {
     UiFont,
     Mcp,
     Drive,
+    TextInput,
+    RenameCanvas,
     CopyToken,
     Pad,
 }
@@ -51,6 +53,8 @@ impl ToolbarButtonId {
         Self::UiFont,
         Self::Mcp,
         Self::Drive,
+        Self::TextInput,
+        Self::RenameCanvas,
         Self::CopyToken,
         Self::Pad,
     ];
@@ -59,6 +63,8 @@ impl ToolbarButtonId {
         vec![
             Self::Open,
             Self::Drive,
+            Self::TextInput,
+            Self::RenameCanvas,
             Self::Image,
             Self::MultiSelect,
             Self::Copy,
@@ -95,6 +101,8 @@ impl ToolbarButtonId {
             Self::UiFont => "앱 폰트",
             Self::Mcp => "MCP",
             Self::Drive => "드라이브",
+            Self::TextInput => "텍스트입력",
+            Self::RenameCanvas => "이름변경",
             Self::CopyToken => "토큰 복사",
             Self::Pad => "단축키",
         }
@@ -119,14 +127,22 @@ pub struct AndroidShellPrefs {
     pub immersive_mode: bool,
     #[serde(default = "ToolbarButtonId::default_bar")]
     pub toolbar_buttons: Vec<ToolbarButtonId>,
+    #[serde(default)]
+    pub pinned_toolbar_buttons: Vec<ToolbarButtonId>,
     #[serde(default = "default_mouse_cursor_scale")]
     pub mouse_cursor_scale: f32,
     #[serde(default = "default_mouse_grip_distance")]
     pub mouse_grip_distance: f32,
     #[serde(default)]
     pub drive_client_id: String,
+    #[serde(default)]
+    pub drive_client_secret: String,
     #[serde(default = "default_true")]
     pub drive_auto_sync: bool,
+    #[serde(default)]
+    pub drive_button_migrated: bool,
+    #[serde(default)]
+    pub text_rename_migrated: bool,
 }
 
 impl Default for AndroidShellPrefs {
@@ -135,10 +151,14 @@ impl Default for AndroidShellPrefs {
             ui_zoom_factor: 1.0,
             immersive_mode: false,
             toolbar_buttons: ToolbarButtonId::default_bar(),
+            pinned_toolbar_buttons: Vec::new(),
             mouse_cursor_scale: default_mouse_cursor_scale(),
             mouse_grip_distance: default_mouse_grip_distance(),
             drive_client_id: String::new(),
+            drive_client_secret: String::new(),
             drive_auto_sync: true,
+            drive_button_migrated: true,
+            text_rename_migrated: true,
         }
     }
 }
@@ -177,8 +197,35 @@ impl AndroidServices {
             .unwrap_or_default();
         prefs.ui_zoom_factor = 1.0;
         prefs.toolbar_buttons.retain(|b| *b != ToolbarButtonId::UiZoom);
+        prefs.pinned_toolbar_buttons.retain(|b| *b != ToolbarButtonId::UiZoom);
+        prefs.toolbar_buttons.retain(|b| !prefs.pinned_toolbar_buttons.contains(b));
         prefs.mouse_cursor_scale = prefs.mouse_cursor_scale.clamp(0.6, 2.0);
         prefs.mouse_grip_distance = prefs.mouse_grip_distance.clamp(24.0, 120.0);
+        if !prefs.drive_button_migrated {
+            if !prefs.toolbar_buttons.contains(&ToolbarButtonId::Drive) && !prefs.pinned_toolbar_buttons.contains(&ToolbarButtonId::Drive) {
+                let pos = prefs.toolbar_buttons.iter().position(|b| *b == ToolbarButtonId::Open).map(|i| i + 1).unwrap_or(0);
+                prefs.toolbar_buttons.insert(pos, ToolbarButtonId::Drive);
+            }
+            prefs.drive_button_migrated = true;
+            self.save_prefs(&prefs);
+        }
+        if !prefs.text_rename_migrated {
+            let mut changed = false;
+            if !prefs.toolbar_buttons.contains(&ToolbarButtonId::TextInput) && !prefs.pinned_toolbar_buttons.contains(&ToolbarButtonId::TextInput) {
+                let pos = prefs.toolbar_buttons.iter().position(|b| *b == ToolbarButtonId::Image).map(|i| i + 1).unwrap_or(0);
+                prefs.toolbar_buttons.insert(pos, ToolbarButtonId::TextInput);
+                changed = true;
+            }
+            if !prefs.toolbar_buttons.contains(&ToolbarButtonId::RenameCanvas) && !prefs.pinned_toolbar_buttons.contains(&ToolbarButtonId::RenameCanvas) {
+                let pos = prefs.toolbar_buttons.iter().position(|b| *b == ToolbarButtonId::TextInput).map(|i| i + 1).unwrap_or(0);
+                prefs.toolbar_buttons.insert(pos, ToolbarButtonId::RenameCanvas);
+                changed = true;
+            }
+            prefs.text_rename_migrated = true;
+            if changed {
+                self.save_prefs(&prefs);
+            }
+        }
         prefs
     }
 
@@ -339,8 +386,21 @@ impl AndroidServices {
         }
     }
 
-    pub fn drive_sign_in(&self, client_id: &str) {
-        let _ = platform::call_activity("drive_sign_in", client_id);
+    pub fn prompt_text_input(&self, initial: &str) {
+        let _ = platform::call_activity("prompt_text_input", initial);
+    }
+
+    pub fn prompt_rename_canvas(&self, current_name: &str) {
+        let _ = platform::call_activity("prompt_rename_canvas", current_name);
+    }
+
+    pub fn pick_drive_json(&self) {
+        let _ = platform::call_activity("pick_drive_json", "");
+    }
+
+    pub fn drive_sign_in(&self, client_id: &str, client_secret: &str) {
+        let arg = format!("{client_id}{SEP}{client_secret}");
+        let _ = platform::call_activity("drive_sign_in", &arg);
     }
 
     pub fn drive_sign_out(&self) {
