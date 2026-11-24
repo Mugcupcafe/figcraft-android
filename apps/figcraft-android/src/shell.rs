@@ -198,7 +198,7 @@ pub struct FigcraftAndroidShell {
     last_wants_keyboard: bool,
     ime_composing: bool,
     game_ime_active: bool,
-    game_ime_committed_bytes: usize,
+    game_ime_prev_committed: String,
     game_ime_last_composing: String,
     last_recovery_stamps: Vec<(u64, Vec<u64>)>,
     last_recovery_save: std::time::Instant,
@@ -340,7 +340,7 @@ impl FigcraftAndroidShell {
             last_wants_keyboard: false,
             ime_composing: false,
             game_ime_active: false,
-            game_ime_committed_bytes: 1,
+            game_ime_prev_committed: " ".to_owned(),
             game_ime_last_composing: String::new(),
             last_recovery_stamps: Vec::new(),
             last_recovery_save: std::time::Instant::now(),
@@ -606,7 +606,8 @@ impl FigcraftAndroidShell {
                         self.mouse_btn_long_fired = true;
                         self.show_mouse_settings = true;
                     }
-                    ctx.request_repaint_after(std::time::Duration::from_millis(40));
+                    let ms = if self.game_ime_active { 16 } else { 40 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(ms));
                 } else {
                     if resp.clicked() && !self.mouse_btn_long_fired {
                         self.toggle_mouse_mode();
@@ -1964,75 +1965,82 @@ impl FigcraftAndroidShell {
             return;
         };
 
-        // Backspace deleted past our committed boundary (including sentinel space)
-        if text.len() < self.game_ime_committed_bytes {
-            if !self.game_ime_last_composing.is_empty() {
-                self.game_ime_last_composing.clear();
-                self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
-                    text: String::new(),
-                    active_range_chars: None,
-                }));
-            } else {
-                self.queue_key_shortcut(egui::Key::Backspace, false, false);
-            }
-            self.game_ime_committed_bytes = 1;
-            platform::game_reset_text_input();
-            return;
-        }
-
-        if let Some((cs_raw, ce_raw)) = compose_region {
-            let cs = cs_raw.min(text.len());
-            let ce = ce_raw.min(text.len());
-            if cs <= ce && text.is_char_boundary(cs) && text.is_char_boundary(ce) {
-                if cs > self.game_ime_committed_bytes && text.is_char_boundary(self.game_ime_committed_bytes) {
-                    let committed = text[self.game_ime_committed_bytes..cs].to_owned();
-                    if !committed.is_empty() {
-                        if !self.game_ime_last_composing.is_empty() {
-                            self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(committed)));
-                            self.game_ime_last_composing.clear();
-                        } else {
-                            self.pending_egui_events.push(egui::Event::Text(committed));
-                        }
-                    }
-                    self.game_ime_committed_bytes = cs;
+        let (cur_committed, cur_composing): (&str, &str) =
+            if let Some((cs_raw, ce_raw)) = compose_region {
+                let cs = cs_raw.min(text.len());
+                let ce = ce_raw.min(text.len());
+                if cs <= ce && text.is_char_boundary(cs) && text.is_char_boundary(ce) {
+                    (&text[..cs], &text[cs..ce])
+                } else {
+                    (text.as_str(), "")
                 }
-                let comp = &text[cs..ce];
-                if comp != self.game_ime_last_composing {
-                    self.game_ime_last_composing = comp.to_owned();
+            } else {
+                (text.as_str(), "")
+            };
+
+        // 1. Diff committed prefix against previous committed prefix WITHOUT resetting IME buffer
+        if cur_committed != self.game_ime_prev_committed {
+            let prev_chars: Vec<char> = self.game_ime_prev_committed.chars().collect();
+            let cur_chars: Vec<char> = cur_committed.chars().collect();
+            let mut common = 0usize;
+            while common < prev_chars.len()
+                && common < cur_chars.len()
+                && prev_chars[common] == cur_chars[common]
+            {
+                common += 1;
+            }
+            let deleted = prev_chars.len().saturating_sub(common);
+            let added: String = cur_chars[common..].iter().collect();
+
+            if deleted == 0 && !added.is_empty() && !self.game_ime_last_composing.is_empty() {
+                // Normal IME commit of composing syllable(s)
+                self.game_ime_last_composing.clear();
+                self.emit_committed_text_or_enter(&added, true);
+            } else {
+                if !self.game_ime_last_composing.is_empty() {
+                    self.game_ime_last_composing.clear();
                     self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
-                        text: self.game_ime_last_composing.clone(),
+                        text: String::new(),
                         active_range_chars: None,
                     }));
                 }
-                return;
+                for _ in 0..deleted.min(32) {
+                    self.queue_key_shortcut(egui::Key::Backspace, false, false);
+                }
+                if !added.is_empty() {
+                    self.emit_committed_text_or_enter(&added, false);
+                }
             }
+            self.game_ime_prev_committed = cur_committed.to_owned();
         }
 
-        // No active composition: commit any text appended after committed_bytes
-        if text.len() > self.game_ime_committed_bytes && text.is_char_boundary(self.game_ime_committed_bytes) {
-            let newly = text[self.game_ime_committed_bytes..].to_owned();
-            if newly == "\n" || newly == "\r\n" {
-                if !self.game_ime_last_composing.is_empty() {
-                    let c = std::mem::take(&mut self.game_ime_last_composing);
-                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(c)));
-                }
-                self.queue_key_shortcut(egui::Key::Enter, false, false);
-            } else if !newly.is_empty() {
-                if !self.game_ime_last_composing.is_empty() {
-                    self.game_ime_last_composing.clear();
-                    self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Commit(newly)));
-                } else {
-                    self.pending_egui_events.push(egui::Event::Text(newly));
-                }
-            }
-            self.game_ime_committed_bytes = 1;
-            platform::game_reset_text_input();
-        } else if !self.game_ime_last_composing.is_empty() {
-            self.game_ime_last_composing.clear();
+        // 2. Update live composing (preedit) slice
+        if cur_composing != self.game_ime_last_composing {
+            self.game_ime_last_composing = cur_composing.to_owned();
             self.pending_egui_events.push(egui::Event::Ime(egui::ImeEvent::Preedit {
-                text: String::new(),
+                text: self.game_ime_last_composing.clone(),
                 active_range_chars: None,
             }));
+        }
+    }
+
+    fn emit_committed_text_or_enter(&mut self, text: &str, via_ime_commit: bool) {
+        let mut first = true;
+        for part in text.split('\n') {
+            if !first {
+                self.queue_key_shortcut(egui::Key::Enter, false, false);
+            }
+            first = false;
+            let clean = part.trim_end_matches('\r');
+            if !clean.is_empty() {
+                if via_ime_commit {
+                    self.pending_egui_events
+                        .push(egui::Event::Ime(egui::ImeEvent::Commit(clean.to_owned())));
+                } else {
+                    self.pending_egui_events
+                        .push(egui::Event::Text(clean.to_owned()));
+                }
+            }
         }
     }
 }
@@ -2131,7 +2139,7 @@ impl eframe::App for FigcraftAndroidShell {
                 egui::ScrollArea::horizontal()
                     .id_salt("topbar_scroll")
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_top(|ui| {
                             ui.spacing_mut().item_spacing.x = 7.0;
                             let buttons = self.prefs.toolbar_buttons.clone();
                             for btn_id in buttons {
