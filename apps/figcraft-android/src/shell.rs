@@ -2119,24 +2119,45 @@ impl FigcraftAndroidShell {
                             "error": { "code": -32001, "message": "AI agent is paused by user" }
                         });
                     }
-                    match shell.fig.session.execute(cmd, cmd_params) {
-                        Ok(out) => {
-                            shell.agent_bubble.record_activity_with_target(cmd, true, Some(cmd_params), None, canvas_rect);
-                            json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": {
-                                    "content": [{ "type": "text", "text": format!("{out:?}") }]
-                                }
-                            })
+                    if mutating {
+                        // Route mutating commands through FigApp::run() so the live GPU canvas,
+                        // Layers panel, Design panel, and selection caches invalidate immediately!
+                        shell.fig.run(cmd, cmd_params.clone());
+                        if cmd == "file.newFromTemplate" || cmd == "file.new" || cmd == "file.open" {
+                            shell.fig.ui.home = false;
                         }
-                        Err(err) => {
-                            shell.agent_bubble.record_activity_with_target(cmd, false, Some(cmd_params), None, canvas_rect);
-                            json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "error": { "code": -32000, "message": format!("{err}") }
-                            })
+                        shell.agent_bubble.record_activity_with_target(cmd, true, Some(cmd_params), None, canvas_rect);
+                        let summary = match shell.fig.session.execute("doc.inspect", &json!({ "depth": 2 })) {
+                            Ok(info) => format!("ok: {cmd} applied live. snapshot={info:?}"),
+                            Err(_) => format!("ok: {cmd} applied live"),
+                        };
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": {
+                                "content": [{ "type": "text", "text": summary }]
+                            }
+                        })
+                    } else {
+                        match shell.fig.session.execute(cmd, cmd_params) {
+                            Ok(out) => {
+                                shell.agent_bubble.record_activity_with_target(cmd, true, Some(cmd_params), None, canvas_rect);
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": {
+                                        "content": [{ "type": "text", "text": format!("{out:?}") }]
+                                    }
+                                })
+                            }
+                            Err(err) => {
+                                shell.agent_bubble.record_activity_with_target(cmd, false, Some(cmd_params), None, canvas_rect);
+                                json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "error": { "code": -32000, "message": format!("{err}") }
+                                })
+                            }
                         }
                     }
                 };
