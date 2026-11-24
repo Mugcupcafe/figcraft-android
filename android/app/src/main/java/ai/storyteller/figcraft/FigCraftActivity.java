@@ -91,6 +91,7 @@ public class FigCraftActivity extends GameActivity {
     private volatile boolean immersiveEnabled = false;
     private ImeBridgeView imeBridgeView;
     private DriveSyncManager driveSyncManager;
+    private TunnelManager tunnelManager;
 
     static {
         try {
@@ -172,6 +173,9 @@ public class FigCraftActivity extends GameActivity {
             }
         });
         driveSyncManager.emitInitialState();
+        tunnelManager = new TunnelManager(this, (state, url, msg) -> {
+            enqueueEvent("tunnel_state" + SEP + state + SEP + (url == null ? "" : url) + SEP + (msg == null ? "" : msg));
+        });
         // GameActivity native GameTextInput handles direct IME without focus conflicts
         View rootView = findViewById(android.R.id.content);
         if (rootView == null && getWindow() != null) {
@@ -227,6 +231,7 @@ public class FigCraftActivity extends GameActivity {
     @Override
     protected void onDestroy() {
         if (isFinishing()) {
+            if (tunnelManager != null) tunnelManager.stop();
             stopService(new Intent(this, McpForegroundService.class));
             if (activeInstance.get() == this) {
                 activeInstance = new WeakReference<>(null);
@@ -578,6 +583,25 @@ public class FigCraftActivity extends GameActivity {
                 }
                 case "prompt_rename_canvas": {
                     runOnUiThread(() -> showNativeRenameCanvasDialog(arg));
+                    return "ok";
+                }
+                case "tunnel_cf_quick": {
+                    int port = 47800;
+                    try { port = Integer.parseInt(arg.trim()); } catch (Throwable ignored) {}
+                    if (tunnelManager != null) tunnelManager.startCloudflareQuick(port);
+                    return "ok";
+                }
+                case "tunnel_cf_named": {
+                    if (tunnelManager != null) {
+                        String[] parts = arg.split(SEP, -1);
+                        String tok = parts.length >= 1 ? parts[0] : "";
+                        String dom = parts.length >= 2 ? parts[1] : "";
+                        tunnelManager.startCloudflareNamed(tok, dom);
+                    }
+                    return "ok";
+                }
+                case "tunnel_stop": {
+                    if (tunnelManager != null) tunnelManager.stop();
                     return "ok";
                 }
                 default:
