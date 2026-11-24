@@ -47,6 +47,7 @@ final class DriveSyncManager {
     private final File cacheDir;
     private final File authFile;
     private final File indexFile;
+    private final File docMapFile;
     private final Listener listener;
 
     private String clientId = "";
@@ -67,6 +68,7 @@ final class DriveSyncManager {
         }
         this.authFile = new File(filesDir, "drive_auth.json");
         this.indexFile = new File(cacheDir, "drive_index.json");
+        this.docMapFile = new File(cacheDir, "drive_doc_map.json");
         this.listener = listener;
         loadAuth();
     }
@@ -234,7 +236,43 @@ final class DriveSyncManager {
         new Thread(this::syncAndListBlocking, "figcraft-drive-sync").start();
     }
 
-    void uploadCanvasAsync(String rawName, String localFigPath, String localThumbPath) {
+    private synchronized String getMappedFileId(String docUid) {
+        if (docUid == null || docUid.isEmpty() || !docMapFile.exists()) return "";
+        try {
+            JSONObject map = new JSONObject(readText(docMapFile));
+            return map.optString(docUid, "");
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private synchronized void putMappedFileId(String docUid, String fileId) {
+        if (docUid == null || docUid.isEmpty() || fileId == null || fileId.isEmpty()) return;
+        try {
+            JSONObject map = docMapFile.exists() ? new JSONObject(readText(docMapFile)) : new JSONObject();
+            map.put(docUid, fileId);
+            writeBytes(docMapFile, map.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    private synchronized void removeMappedFileId(String fileId) {
+        if (fileId == null || fileId.isEmpty() || !docMapFile.exists()) return;
+        try {
+            JSONObject map = new JSONObject(readText(docMapFile));
+            JSONObject next = new JSONObject();
+            java.util.Iterator<String> keys = map.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                String v = map.optString(k, "");
+                if (!fileId.equals(v)) next.put(k, v);
+            }
+            writeBytes(docMapFile, next.toString().getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {
+        }
+    }
+
+    void uploadCanvasAsync(String docUid, String rawName, String localFigPath, String localThumbPath) {
         new Thread(() -> {
             try {
                 if (!ensureAccessToken()) {
@@ -251,7 +289,6 @@ final class DriveSyncManager {
                 if (!localFig.exists()) return;
                 byte[] figBytes = readBytes(localFig);
 
-                // Cache locally
                 File cachedFig = new File(cacheDir, figFileName);
                 writeBytes(cachedFig, figBytes);
                 String cachedThumbPath = "";
@@ -264,27 +301,48 @@ final class DriveSyncManager {
                     }
                 }
 
-                String existingId = findFileInFolder(fid, figFileName);
-                JSONObject meta = new JSONObject();
-                meta.put("name", figFileName);
+                // Prefer 1:1 docUid mapping so renaming a canvas renames & updates the existing Drive file without duplicates
+                String existingId = getMappedFileId(docUid);
                 if (existingId.isEmpty()) {
-                    JSONArray parents = new JSONArray();
-                    parents.put(fid);
-                    meta.put("parents", parents);
+                    existingId = findFileInFolder(fid, figFileName);
                 }
 
-                JSONObject uploaded = uploadMultipart(
-                        existingId.isEmpty() ? "POST" : "PATCH",
-                        existingId.isEmpty()
-                                ? "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime"
-                                : "https://www.googleapis.com/upload/drive/v3/files/" + enc(existingId) + "?uploadType=multipart&fields=id,name,modifiedTime",
-                        meta,
-                        "application/octet-stream",
-                        figBytes
-                );
+                JSONObject uploaded = null;
+                if (!existingId.isEmpty()) {
+                    try {
+                        JSONObject patchMeta = new JSONObject();
+                        patchMeta.put("name", figFileName);
+                        uploaded = uploadMultipart(
+                                "PATCH",
+                                "https://www.googleapis.com/upload/drive/v3/files/" + enc(existingId) + "?uploadType=multipart&fields=id,name,modifiedTime",
+                                patchMeta,
+                                "application/octet-stream",
+                                figBytes
+                        );
+                    } catch (Exception patchErr) {
+                        // If remote file was deleted externally (404), fall back to creating a new file
+                        existingId = "";
+                    }
+                }
+                if (uploaded == null) {
+                    JSONObject createMeta = new JSONObject();
+                    createMeta.put("name", figFileName);
+                    JSONArray parents = new JSONArray();
+                    parents.put(fid);
+                    createMeta.put("parents", parents);
+                    uploaded = uploadMultipart(
+                            "POST",
+                            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime",
+                            createMeta,
+                            "application/octet-stream",
+                            figBytes
+                    );
+                }
 
+                String finalId = uploaded.optString("id", existingId);
+                putMappedFileId(docUid, finalId);
                 upsertIndexEntry(
-                        uploaded.optString("id", existingId),
+                        finalId,
                         figFileName,
                         uploaded.optString("modifiedTime", ""),
                         cachedFig.getAbsolutePath(),
@@ -296,6 +354,34 @@ final class DriveSyncManager {
                 listener.onStatus("Drive 업로드 오류: " + e.getMessage());
             }
         }, "figcraft-drive-upload").start();
+    }
+
+    void deleteDriveFileAsync(String fileId, String name) {
+        new Thread(() -> {
+            try {
+                if (fileId != null && !fileId.isEmpty() && ensureAccessToken()) {
+                    HttpURLConnection conn = (HttpURLConnection) new URL("https://www.googleapis.com/drive/v3/files/" + enc(fileId)).openConnection();
+                    conn.setRequestMethod("DELETE");
+                    conn.setConnectTimeout(15_000);
+                    conn.setReadTimeout(20_000);
+                    conn.setRequestProperty("Authorization", "Bearer " + accessToken);
+                    conn.getResponseCode();
+                    conn.disconnect();
+                }
+                removeMappedFileId(fileId);
+                String safeName = sanitizeCanvasName(name);
+                if (!safeName.endsWith(".figcraft")) safeName += ".figcraft";
+                File cached = new File(cacheDir, safeName);
+                if (cached.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    cached.delete();
+                }
+                removeIndexEntry(fileId, name);
+                listener.onStatus("Drive 파일 삭제 완료: " + safeName);
+            } catch (Exception e) {
+                listener.onStatus("Drive 삭제 오류: " + e.getMessage());
+            }
+        }, "figcraft-drive-delete").start();
     }
 
     void openDriveFileAsync(String fileId, String name) {
@@ -447,7 +533,33 @@ final class DriveSyncManager {
                 for (int i = 0; i < oldArr.length(); i++) {
                     JSONObject o = oldArr.optJSONObject(i);
                     if (o == null) continue;
-                    if (!name.equals(o.optString("name", ""))) {
+                    if (!name.equals(o.optString("name", "")) && (fileId.isEmpty() || !fileId.equals(o.optString("file_id", "")))) {
+                        nextArr.put(o);
+                    }
+                }
+            }
+            JSONObject out = new JSONObject();
+            out.put("items", nextArr);
+            String json = out.toString();
+            writeBytes(indexFile, json.getBytes(StandardCharsets.UTF_8));
+            listener.onIndexUpdated(json);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private synchronized void removeIndexEntry(String fileId, String name) {
+        try {
+            if (!indexFile.exists()) return;
+            JSONObject idx = new JSONObject(readText(indexFile));
+            JSONArray oldArr = idx.optJSONArray("items");
+            JSONArray nextArr = new JSONArray();
+            if (oldArr != null) {
+                for (int i = 0; i < oldArr.length(); i++) {
+                    JSONObject o = oldArr.optJSONObject(i);
+                    if (o == null) continue;
+                    boolean sameId = fileId != null && !fileId.isEmpty() && fileId.equals(o.optString("file_id", ""));
+                    boolean sameName = name != null && !name.isEmpty() && name.equals(o.optString("name", ""));
+                    if (!sameId && !sameName) {
                         nextArr.put(o);
                     }
                 }
