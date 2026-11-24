@@ -1167,6 +1167,7 @@ impl FigcraftAndroidShell {
             let _ = self.services.request_pick_fonts_dir();
         }
         if let Some(fam) = apply_family {
+            let _ = self.fig.session.execute("text.rescanFonts", &json!({}));
             let ok = self
                 .fig
                 .session
@@ -1178,6 +1179,7 @@ impl FigcraftAndroidShell {
                     .execute("node.set", &json!({ "fontFamily": fam }))
                     .is_ok();
             if ok {
+                let _ = self.fig.session.execute("text.refit", &json!({}));
                 self.status_banner = Some(format!("폰트 적용: {fam}"));
             } else {
                 self.status_banner = Some("먼저 캔버스에서 텍스트 레이어를 선택해 주세요".into());
@@ -1474,12 +1476,11 @@ impl FigcraftAndroidShell {
                     let _ = uri;
                 }
                 ActivityEvent::FontsSynced { count } => {
-                    std::thread::spawn(|| {
-                        figcraft_text::scan_system_fonts();
-                    });
+                    let _ = self.fig.session.execute("text.rescanFonts", &json!({}));
+                    let _ = self.fig.session.execute("text.refit", &json!({}));
                     self.refresh_font_catalog();
                     self.ui_font_frame_count = 0;
-                    self.status_banner = Some(format!("사용자 폰트 {count}개 동기화 완료"));
+                    self.status_banner = Some(format!("사용자 폰트 {count}개 동기화 및 등록 완료"));
                 }
                 ActivityEvent::UiFontPicked { path, display_name } => {
                     self.pending_ui_font_path = Some(PathBuf::from(path));
@@ -1488,6 +1489,7 @@ impl FigcraftAndroidShell {
                 ActivityEvent::FilesDir(dir) => {
                     self.java_files_dir = Some(PathBuf::from(dir));
                     self.ui_font_frame_count = 0;
+                    let _ = self.fig.session.execute("text.rescanFonts", &json!({}));
                 }
                 ActivityEvent::SystemTheme { dark } => {
                     self.android_system_dark = Some(dark);
