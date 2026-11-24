@@ -146,6 +146,10 @@ workflows:
           mkdir -p "$JNI_OUT"
           cp target/aarch64-linux-android/release/libfigcraft_android.so "$JNI_OUT/"
           cp "$SYSROOT_LIB/libc++_shared.so" "$JNI_OUT/"
+          if [ ! -s "$JNI_OUT/libcloudflared.so" ]; then
+            curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" -o "$JNI_OUT/libcloudflared.so"
+            chmod +x "$JNI_OUT/libcloudflared.so"
+          fi
           ls -lh "$JNI_OUT"
 
       - name: Assemble Android ARM64 Debug APK
