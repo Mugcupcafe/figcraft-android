@@ -39,6 +39,7 @@ final class DriveSyncManager {
         void onIndexUpdated(String indexJson);
         void onStatus(String message);
         void onFileReadyToOpen(String localPath, String displayName);
+        void onCredentialsImported(String clientId, String clientSecret);
     }
 
     private final Activity activity;
@@ -49,6 +50,7 @@ final class DriveSyncManager {
     private final Listener listener;
 
     private String clientId = "";
+    private String clientSecret = "";
     private String accessToken = "";
     private String refreshToken = "";
     private long expiresAtMs = 0L;
@@ -83,14 +85,47 @@ final class DriveSyncManager {
         return !refreshToken.isEmpty() || (!accessToken.isEmpty() && System.currentTimeMillis() < expiresAtMs);
     }
 
-    void startSignIn(String inputClientId) {
+    void importCredentialsJson(InputStream in) {
+        try {
+            if (in == null) {
+                listener.onStatus("JSON 파일을 열 수 없습니다.");
+                return;
+            }
+            String text = new String(readStream(in), StandardCharsets.UTF_8);
+            JSONObject root = new JSONObject(text);
+            JSONObject section = root.optJSONObject("installed");
+            if (section == null) section = root.optJSONObject("web");
+            if (section == null) section = root;
+            String cid = section.optString("client_id", "").trim();
+            String csec = section.optString("client_secret", "").trim();
+            if (cid.isEmpty()) {
+                listener.onStatus("올바른 Google OAuth JSON 파일이 아닙니다 (client_id 없음).");
+                return;
+            }
+            synchronized (this) {
+                this.clientId = cid;
+                this.clientSecret = csec;
+                saveAuth();
+            }
+            listener.onCredentialsImported(cid, csec);
+            listener.onStatus("OAuth JSON 불러오기 완료! 이제 'Google 로그인'을 누르세요.");
+        } catch (Exception e) {
+            listener.onStatus("JSON 파싱 오류: " + e.getMessage());
+        }
+    }
+
+    void startSignIn(String inputClientId, String inputClientSecret) {
         final String cid = inputClientId != null ? inputClientId.trim() : "";
+        final String csec = inputClientSecret != null ? inputClientSecret.trim() : "";
         if (cid.isEmpty()) {
-            listener.onStatus("Google OAuth Client ID를 먼저 입력하세요.");
+            listener.onStatus("먼저 JSON 파일을 불러오거나 OAuth Client ID를 입력하세요.");
             return;
         }
-        this.clientId = cid;
-        saveAuth();
+        synchronized (this) {
+            this.clientId = cid;
+            this.clientSecret = csec;
+            saveAuth();
+        }
 
         new Thread(() -> {
             ServerSocket server = null;
@@ -151,6 +186,7 @@ final class DriveSyncManager {
 
                     String tokenBody = "code=" + enc(code)
                             + "&client_id=" + enc(cid)
+                            + (csec.isEmpty() ? "" : ("&client_secret=" + enc(csec)))
                             + "&code_verifier=" + enc(codeVerifier)
                             + "&redirect_uri=" + enc(redirectUri)
                             + "&grant_type=authorization_code";
@@ -346,6 +382,7 @@ final class DriveSyncManager {
             return false;
         }
         String body = "client_id=" + enc(clientId)
+                + (clientSecret.isEmpty() ? "" : ("&client_secret=" + enc(clientSecret)))
                 + "&refresh_token=" + enc(refreshToken)
                 + "&grant_type=refresh_token";
         JSONObject tok = httpJson("POST", "https://oauth2.googleapis.com/token", null, "application/x-www-form-urlencoded", body.getBytes(StandardCharsets.UTF_8));
@@ -485,6 +522,7 @@ final class DriveSyncManager {
         try {
             JSONObject obj = new JSONObject(readText(authFile));
             clientId = obj.optString("client_id", "");
+            clientSecret = obj.optString("client_secret", "");
             accessToken = obj.optString("access_token", "");
             refreshToken = obj.optString("refresh_token", "");
             expiresAtMs = obj.optLong("expires_at_ms", 0L);
@@ -498,6 +536,7 @@ final class DriveSyncManager {
         try {
             JSONObject obj = new JSONObject();
             obj.put("client_id", clientId);
+            obj.put("client_secret", clientSecret);
             obj.put("access_token", accessToken);
             obj.put("refresh_token", refreshToken);
             obj.put("expires_at_ms", expiresAtMs);
