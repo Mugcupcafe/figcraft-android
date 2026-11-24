@@ -4,6 +4,7 @@
 //! - Uses `event_loop_builder` (`with_android_app`) for modern `eframe`/`winit` compatibility.
 //! - Keeps `unsafe` strictly confined to `platform.rs` and the `android_main` FFI export.
 
+pub mod agent_bubble;
 pub mod mcp_http;
 pub mod platform;
 pub mod protocol;
