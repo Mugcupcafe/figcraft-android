@@ -76,12 +76,19 @@ workflows:
                   p.write_text(s[:idx] + new_block + s[end + 2:], encoding="utf-8")
                   print(f"Patched paint_wordmark in {p}: FigCraft (base) + Mobile (accent)")
                   break
+          for p in sorted(Path("crates/text/src").rglob("*.rs")):
+              s = p.read_text(encoding="utf-8")
+              if '"/usr/share/fonts"' in s and '"/system/fonts"' not in s:
+                  s = s.replace('"/usr/share/fonts"', '"/usr/share/fonts", "/system/fonts", "/product/fonts"')
+                  p.write_text(s, encoding="utf-8")
+                  print(f"Added Android /system/fonts to {p}")
           EOF
 
       - name: Run host unit tests (protocol, touch, mcp_http)
         script: |
           export PATH="$HOME/.cargo/bin:$PATH"
           export CRAFT_FONTS_DIR="$CM_BUILD_DIR/.craft-fonts"
+          export FIGCRAFT_EMBED_CJK=1
           cargo test -p figcraft-android
 
       - name: Cross-compile libfigcraft_android.so & bundle libc++_shared.so
@@ -103,6 +110,7 @@ workflows:
           export CXX_aarch64_linux_android="$BIN/aarch64-linux-android${ANDROID_API}-clang++"
           export AR_aarch64_linux_android="$BIN/llvm-ar"
           export CRAFT_FONTS_DIR="$CM_BUILD_DIR/.craft-fonts"
+          export FIGCRAFT_EMBED_CJK=1
 
           cargo build -p figcraft-android --lib --target aarch64-linux-android --release
 
