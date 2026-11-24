@@ -188,6 +188,8 @@ pub struct AndroidShellPrefs {
     pub ai_bubble_show_speech: bool,
     #[serde(default = "default_true")]
     pub ai_cursor_enabled: bool,
+    #[serde(default)]
+    pub ai_agent_name: String,
 }
 
 impl Default for AndroidShellPrefs {
@@ -215,6 +217,7 @@ impl Default for AndroidShellPrefs {
             ai_bubble_pos_y: -1.0,
             ai_bubble_show_speech: true,
             ai_cursor_enabled: true,
+            ai_agent_name: String::new(),
         }
     }
 }
