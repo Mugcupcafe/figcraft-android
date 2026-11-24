@@ -208,6 +208,8 @@ pub struct AndroidShellPrefs {
     pub ngrok_authtoken: String,
     #[serde(default)]
     pub ngrok_domain: String,
+    #[serde(default)]
+    pub mcp_bearer_token: String,
 }
 
 impl Default for AndroidShellPrefs {
@@ -241,6 +243,7 @@ impl Default for AndroidShellPrefs {
             cf_tunnel_domain: String::new(),
             ngrok_authtoken: String::new(),
             ngrok_domain: String::new(),
+            mcp_bearer_token: String::new(),
         }
     }
 }
