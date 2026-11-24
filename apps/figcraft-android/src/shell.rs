@@ -14,6 +14,47 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontCategory {
+    All,
+    Variable,
+    Korean,
+    Sans,
+    Serif,
+    Mono,
+}
+
+impl FontCategory {
+    const ALL: &[Self] = &[
+        Self::All,
+        Self::Variable,
+        Self::Korean,
+        Self::Sans,
+        Self::Serif,
+        Self::Mono,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "전체",
+            Self::Variable => "가변글꼴(VF)",
+            Self::Korean => "한글",
+            Self::Sans => "고딕(Sans)",
+            Self::Serif => "명조(Serif)",
+            Self::Mono => "고정폭(Mono)",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FontCatalogEntry {
+    family: String,
+    is_variable: bool,
+    is_korean: bool,
+    style: FontCategory,
+    source_tag: &'static str,
+}
+
 struct DriveCanvasItem {
     #[serde(default)]
     file_id: String,
@@ -138,6 +179,13 @@ pub struct FigcraftAndroidShell {
     asset_rx: mpsc::Receiver<LoadedAsset>,
     ui_font_frame_count: u32,
     pending_ui_font_path: Option<PathBuf>,
+    cached_ui_font: Option<(String, Vec<u8>)>,
+    font_browser_open: bool,
+    font_browser_anchor: Option<egui::Pos2>,
+    font_browser_open_seq: u64,
+    font_filter: FontCategory,
+    font_search: String,
+    font_catalog: Vec<FontCatalogEntry>,
     java_files_dir: Option<PathBuf>,
     last_light_bars: Option<bool>,
     android_system_dark: Option<bool>,
@@ -268,6 +316,13 @@ impl FigcraftAndroidShell {
             asset_rx,
             ui_font_frame_count: 0,
             pending_ui_font_path: None,
+            cached_ui_font: None,
+            font_browser_open: false,
+            font_browser_anchor: None,
+            font_browser_open_seq: 0,
+            font_filter: FontCategory::All,
+            font_search: String::new(),
+            font_catalog: Vec::new(),
             java_files_dir: None,
             last_light_bars: None,
             android_system_dark: None,
@@ -287,12 +342,22 @@ impl FigcraftAndroidShell {
     }
 
     fn install_ui_font_from_path(&mut self, ctx: &egui::Context, path: &std::path::Path, label: &str) -> bool {
-        let Ok(bytes) = std::fs::read(path) else {
-            return false;
+        let cache_key = path.to_string_lossy().into_owned();
+        let bytes = if let Some((k, b)) = &self.cached_ui_font {
+            if k == &cache_key {
+                b.clone()
+            } else {
+                let Ok(read_b) = std::fs::read(path) else { return false; };
+                if read_b.len() < 4096 { return false; }
+                self.cached_ui_font = Some((cache_key, read_b.clone()));
+                read_b
+            }
+        } else {
+            let Ok(read_b) = std::fs::read(path) else { return false; };
+            if read_b.len() < 4096 { return false; }
+            self.cached_ui_font = Some((cache_key, read_b.clone()));
+            read_b
         };
-        if bytes.len() < 4096 {
-            return false;
-        }
         let existing_families: Vec<egui::FontFamily> = ctx.fonts(|f| f.families());
         let mut targets: Vec<egui::InsertFontFamily> = Vec::new();
         for family in existing_families {
@@ -558,8 +623,18 @@ impl FigcraftAndroidShell {
                 }
             }
             ToolbarButtonId::Fonts => {
-                if ui.add(egui::Button::new("폰트").min_size(egui::vec2(46.0, h))).clicked() {
-                    let _ = self.services.request_pick_fonts_dir();
+                let resp = ui.add(
+                    egui::Button::new("폰트")
+                        .selected(self.font_browser_open)
+                        .min_size(egui::vec2(46.0, h)),
+                );
+                if resp.clicked() {
+                    self.font_browser_open = !self.font_browser_open;
+                    if self.font_browser_open {
+                        self.font_browser_anchor = Some(egui::pos2(resp.rect.left(), resp.rect.bottom() + 6.0));
+                        self.font_browser_open_seq = self.font_browser_open_seq.wrapping_add(1);
+                        self.refresh_font_catalog();
+                    }
                 }
             }
             ToolbarButtonId::UiFont => {
@@ -648,7 +723,7 @@ impl FigcraftAndroidShell {
         let pos = Self::clamped_popup_pos(ctx, self.toolbar_editor_anchor, 380.0, 440.0);
 
         egui::Window::new("상단바 버튼 편집")
-            .id(egui::Id::new(("toolbar_editor_win", self.toolbar_editor_open_seq)))
+            .id(egui::Id::unique(("toolbar_editor_win", self.toolbar_editor_open_seq)))
             .default_pos(pos)
             .open(&mut open)
             .collapsible(false)
@@ -783,6 +858,203 @@ impl FigcraftAndroidShell {
             self.services.save_prefs(&self.prefs);
         }
         self.show_toolbar_editor = open;
+    }
+
+    fn toggle_mouse_mode(&mut self) {
+        self.tablet_input.mouse_cursor_mode = !self.tablet_input.mouse_cursor_mode;
+        if self.tablet_input.mouse_cursor_mode {
+            self.tablet_input.virtual_cursor_pos = self.tablet_input.screen_rect.center();
+        }
+        self.status_banner = Some(if self.tablet_input.mouse_cursor_mode {
+            "마우스 모드 켜짐 (우하단 그립으로 조작)".into()
+        } else {
+            "마우스 모드 꺼짐 (직접 터치)".into()
+        });
+    }
+
+    fn is_variable_font_file(path: &std::path::Path) -> bool {
+        let Ok(mut f) = std::fs::File::open(path) else { return false; };
+        let mut buf = [0u8; 4096];
+        let Ok(n) = std::io::Read::read(&mut f, &mut buf) else { return false; };
+        buf[..n].windows(4).any(|w| w == b"fvar")
+    }
+
+    fn classify_font_name(name: &str) -> (bool, FontCategory) {
+        let lower = name.to_lowercase();
+        let is_korean = lower.contains("kr")
+            || lower.contains("cjk")
+            || lower.contains("hangul")
+            || lower.contains("pretendard")
+            || lower.contains("nanum")
+            || lower.contains("noto")
+            || lower.contains("spoqa")
+            || lower.contains("gmarket")
+            || lower.contains("suit")
+            || lower.contains("maruburi")
+            || lower.contains("batang")
+            || lower.contains("gulim")
+            || lower.contains("dotum")
+            || lower.contains("malgun")
+            || name.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c));
+        let style = if lower.contains("mono") || lower.contains("code") || lower.contains("console") || lower.contains("courier") {
+            FontCategory::Mono
+        } else if lower.contains("serif") || lower.contains("myeongjo") || lower.contains("batang") || lower.contains("maruburi") || lower.contains("georgia") || lower.contains("times") {
+            FontCategory::Serif
+        } else {
+            FontCategory::Sans
+        };
+        (is_korean, style)
+    }
+
+    fn refresh_font_catalog(&mut self) {
+        let mut entries: Vec<FontCatalogEntry> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        let mut scan_dir = |dir: &std::path::Path, tag: &'static str| {
+            let Ok(rd) = std::fs::read_dir(dir) else { return; };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue; };
+                let ext_l = ext.to_lowercase();
+                if !matches!(ext_l.as_str(), "ttf" | "otf" | "ttc" | "otc") {
+                    continue;
+                }
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").trim();
+                if stem.is_empty() {
+                    continue;
+                }
+                let family = stem
+                    .split('-')
+                    .next()
+                    .unwrap_or(stem)
+                    .replace('_', " ")
+                    .trim()
+                    .to_owned();
+                if family.is_empty() || !seen.insert(family.to_lowercase()) {
+                    continue;
+                }
+                let is_variable = Self::is_variable_font_file(&path)
+                    || stem.to_lowercase().contains("variable")
+                    || stem.to_lowercase().contains("vf");
+                let (is_korean, style) = Self::classify_font_name(&family);
+                entries.push(FontCatalogEntry {
+                    family,
+                    is_variable,
+                    is_korean,
+                    style,
+                    source_tag: tag,
+                });
+            }
+        };
+
+        if let Some(dir) = &self.java_files_dir {
+            scan_dir(&dir.join("fonts"), "사용자");
+        }
+        scan_dir(&self.services.staged_fonts_dir, "사용자");
+        scan_dir(std::path::Path::new("/system/fonts"), "시스템");
+        scan_dir(std::path::Path::new("/product/fonts"), "시스템");
+
+        entries.sort_by(|a, b| {
+            b.is_korean
+                .cmp(&a.is_korean)
+                .then_with(|| b.is_variable.cmp(&a.is_variable))
+                .then_with(|| a.family.to_lowercase().cmp(&b.family.to_lowercase()))
+        });
+        self.font_catalog = entries;
+    }
+
+    fn show_font_browser_window(&mut self, ctx: &egui::Context) {
+        if !self.font_browser_open {
+            return;
+        }
+        let mut open = self.font_browser_open;
+        let mut pick_folder = false;
+        let mut apply_family: Option<String> = None;
+        let pos = Self::clamped_popup_pos(ctx, self.font_browser_anchor, 420.0, 460.0);
+
+        egui::Window::new("폰트 분류 탐색기")
+            .id(egui::Id::unique(("font_browser_win", self.font_browser_open_seq)))
+            .default_pos(pos)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .default_height(460.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("폴더에서 폰트 추가").clicked() {
+                        pick_folder = true;
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.font_search)
+                            .desired_width(210.0)
+                            .hint_text("폰트 검색 (탭해서 입력)"),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    for &cat in FontCategory::ALL {
+                        if ui.selectable_label(self.font_filter == cat, cat.label()).clicked() {
+                            self.font_filter = cat;
+                        }
+                    }
+                });
+                ui.separator();
+
+                let q = self.font_search.trim().to_lowercase();
+                let list = self.font_catalog.clone();
+                egui::ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
+                    let mut shown = 0usize;
+                    for item in &list {
+                        let cat_ok = match self.font_filter {
+                            FontCategory::All => true,
+                            FontCategory::Variable => item.is_variable,
+                            FontCategory::Korean => item.is_korean,
+                            other => item.style == other,
+                        };
+                        if !cat_ok {
+                            continue;
+                        }
+                        if !q.is_empty() && !item.family.to_lowercase().contains(&q) {
+                            continue;
+                        }
+                        shown += 1;
+                        ui.horizontal(|ui| {
+                            if ui.button(&item.family).clicked() {
+                                apply_family = Some(item.family.clone());
+                            }
+                            if item.is_variable {
+                                ui.label(egui::RichText::new("VF").size(10.5).color(egui::Color32::from_rgb(76, 175, 80)));
+                            }
+                            if item.is_korean {
+                                ui.label(egui::RichText::new("한글").size(10.5).color(egui::Color32::from_rgb(100, 181, 246)));
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(egui::RichText::new(item.source_tag).size(10.5).weak());
+                            });
+                        });
+                    }
+                    if shown == 0 {
+                        ui.label("조건에 맞는 폰트가 없습니다. 위 '폴더에서 폰트 추가'로 .ttf/.otf 폴더를 불러오세요.");
+                    }
+                });
+            });
+
+        self.font_browser_open = open;
+        if pick_folder {
+            let _ = self.services.request_pick_fonts_dir();
+        }
+        if let Some(fam) = apply_family {
+            let ok = self
+                .fig
+                .session
+                .execute("text.style", &json!({ "fontFamily": fam }))
+                .is_ok();
+            if !ok {
+                self.fig.run("node.set", json!({ "fontFamily": fam }));
+            }
+            self.status_banner = Some(format!("폰트 적용: {fam}"));
+        }
     }
 
     fn show_mouse_settings_window(&mut self, ctx: &egui::Context) {
@@ -1025,7 +1297,9 @@ impl FigcraftAndroidShell {
                     std::thread::spawn(|| {
                         figcraft_text::scan_system_fonts();
                     });
-                    self.status_banner = Some(format!("Synced {count} user font(s)"));
+                    self.refresh_font_catalog();
+                    self.ui_font_frame_count = 0;
+                    self.status_banner = Some(format!("사용자 폰트 {count}개 동기화 완료"));
                 }
                 ActivityEvent::UiFontPicked { path, display_name } => {
                     self.pending_ui_font_path = Some(PathBuf::from(path));
@@ -1076,7 +1350,7 @@ impl FigcraftAndroidShell {
                 ActivityEvent::RenameCanvas(new_name) => {
                     let mut renamed = false;
                     if let Some(doc_state) = self.fig.session.docs.get_mut(self.fig.session.active) {
-                        doc_state.doc.name = new_name.clone();
+                        Arc::make_mut(&mut doc_state.doc).name = new_name.clone();
                         renamed = true;
                     }
                     if renamed {
@@ -1357,7 +1631,7 @@ impl FigcraftAndroidShell {
 
         let drive_pos = Self::clamped_popup_pos(ctx, self.drive_window_anchor, 540.0, 500.0);
         egui::Window::new("Google Drive (FigCraft 폴더)")
-            .id(egui::Id::new(("drive_sync_win", self.drive_window_open_seq)))
+            .id(egui::Id::unique(("drive_sync_win", self.drive_window_open_seq)))
             .default_pos(drive_pos)
             .open(&mut open)
             .resizable(true)
@@ -1644,6 +1918,7 @@ impl eframe::App for FigcraftAndroidShell {
         if self.last_light_bars != Some(is_light_theme) {
             self.last_light_bars = Some(is_light_theme);
             self.services.set_light_system_bars(is_light_theme);
+            self.ui_font_frame_count = 0;
         }
 
         let top_inset = self.tablet_input.safe_insets_px[0] / ppp;
@@ -1761,6 +2036,7 @@ impl eframe::App for FigcraftAndroidShell {
         self.show_toolbar_editor_window(&ctx);
         self.show_mouse_settings_window(&ctx);
         self.show_drive_window(&ctx);
+        self.show_font_browser_window(&ctx);
         if self.fig.ui.home {
             self.show_home_drive_strip(ui);
         }
